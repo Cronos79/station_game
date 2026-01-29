@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Station Game</title>
+</head>
+<body>
+  <h1>Station Game</h1>
+  <button id="btn">Call /api/hello</button>
+  <button onclick="buildSolar()">Build Solar Array</button>
+  <pre id="out">(waiting)</pre>
+
+<script>
+  const out = document.getElementById("out");
+
+  async function refresh() {
+    const r = await fetch("/api/state");
+    const data = await r.json();
+    out.textContent = JSON.stringify(data, null, 2);
+  }
+
+  async function buildSolar() {
+  const r = await fetch("/api/build/solar_array", { method: "POST" });
+  const data = await r.json();
+  out.textContent = JSON.stringify(data, null, 2);
+}
+
+
+  // refresh immediately, then every 1 second
+  refresh();
+  setInterval(refresh, 1000);
+</script>
+</body>
+</html>
