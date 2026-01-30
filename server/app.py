@@ -5,18 +5,17 @@ from pathlib import Path
 from fastapi import FastAPI, Body, Request, Response, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from server.game.db import init_db, get_conn
+from server.game.db import get_conn, init_db
 from server.game.auth import hash_password, verify_password
 
 app = FastAPI()
-
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
 SESSION_COOKIE = "station_session"
 
 
 @app.on_event("startup")
 def on_startup():
-    # Ensure DB tables exist (users/sessions)
     init_db()
     print("🚀 Server starting up")
 
@@ -25,8 +24,6 @@ def on_startup():
 def on_shutdown():
     print("🛑 Server shutting down cleanly")
 
-
-# -------- Helpers --------
 
 def get_user_id_from_request(request: Request) -> int | None:
     token = request.cookies.get(SESSION_COOKIE)
@@ -137,9 +134,6 @@ def api_me(request: Request):
         return {"ok": True, "user_id": None}
 
     with get_conn() as conn:
-        row = conn.execute(
-            "SELECT username FROM users WHERE id=?",
-            (user_id,),
-        ).fetchone()
+        row = conn.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
 
     return {"ok": True, "user_id": user_id, "username": row["username"] if row else None}

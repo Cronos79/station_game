@@ -1,18 +1,31 @@
-<h1>Station Game</h1>
-<pre id="who"></pre>
-<button id="logoutBtn">Logout</button>
+<!doctype html>
+<html>
 
-<script>
-  async function refreshMe() {
-    const r = await fetch("/api/me");
-    const data = await r.json();
-    document.getElementById("who").textContent = JSON.stringify(data, null, 2);
-  }
+<head>
+  <meta charset="utf-8" />
+  <title>Station Game</title>
+</head>
 
-  document.getElementById("logoutBtn").onclick = async () => {
-    await fetch("/api/logout", { method: "POST" });
-    location.href = "/login";
-  };
+<body>
+  <h1>Station Game</h1>
 
-  refreshMe();
-</script>
+  <pre id="me">(loading...)</pre>
+  <button id="logoutBtn">Logout</button>
+
+  <script>
+    async function refreshMe() {
+      const r = await fetch("/api/me");
+      const data = await r.json();
+      document.getElementById("me").textContent = JSON.stringify(data, null, 2);
+    }
+
+    document.getElementById("logoutBtn").onclick = async () => {
+      await fetch("/api/logout", { method: "POST" });
+      location.href = "/login";
+    };
+
+    refreshMe();
+  </script>
+</body>
+
+</html>
