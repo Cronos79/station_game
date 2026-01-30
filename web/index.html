@@ -3,32 +3,223 @@
 <head>
   <meta charset="utf-8" />
   <title>Station Game</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 0; }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-bottom: 1px solid #ddd;
+      background: #111;
+      color: #eee;
+    }
+    .topbar .left, .topbar .right { display: flex; gap: 10px; align-items: center; }
+    .brand { font-weight: 700; letter-spacing: 0.5px; }
+    button { padding: 6px 10px; cursor: pointer; }
+    .wrap { padding: 14px; }
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+    }
+    .card h2 { margin: 0 0 10px 0; font-size: 16px; }
+    .muted { color: #666; font-size: 12px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; }
+    code, pre { background: #f6f6f6; padding: 8px; border-radius: 6px; }
+    pre { overflow: auto; }
+    .pill {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #333;
+      color: #eee;
+    }
+    .btn-primary { background: #2b6cb0; color: white; border: none; }
+    .btn-danger { background: #b02b2b; color: white; border: none; }
+    .btn-ghost { background: transparent; color: #eee; border: 1px solid #555; }
+    .queue-item { padding: 6px 8px; border: 1px solid #eee; border-radius: 6px; margin: 6px 0; }
+  </style>
 </head>
+
 <body>
-  <h1>Station Game</h1>
-  <button id="btn">Call /api/hello</button>
-  <button onclick="buildSolar()">Build Solar Array</button>
-  <pre id="out">(waiting)</pre>
+  <!-- Top Admin Bar -->
+  <div class="topbar">
+    <div class="left">
+      <div class="brand">Station Game</div>
+      <span class="pill" id="userPill">Not logged in</span>
+    </div>
+
+    <div class="right">
+      <button class="btn-ghost" id="helloBtn">Hello</button>
+      <button class="btn-ghost" id="saveBtn">Save</button>
+      <button class="btn-ghost" id="loadBtn">Load Latest</button>
+      <button class="btn-danger" id="logoutBtn">Logout</button>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <div class="grid">
+      <!-- Left: Station Summary + Gameplay Buttons -->
+      <div class="card">
+        <h2>Station</h2>
+        <div class="muted" id="stationName">(loading)</div>
+
+        <div style="height:10px;"></div>
+
+        <div class="kv">
+          <div>Credits</div><div id="credits">-</div>
+          <div>Power</div><div id="power">-</div>
+          <div>Rate (cr/s)</div><div id="rateCredits">-</div>
+          <div>Rate (pw/s)</div><div id="ratePower">-</div>
+        </div>
+
+        <div style="height:12px;"></div>
+
+        <h2>Build</h2>
+        <div class="row">
+          <button class="btn-primary" id="buildSolarBtn">Queue Solar Array</button>
+        </div>
+        <div class="muted" id="buildMsg"></div>
+
+        <div style="height:12px;"></div>
+
+        <h2>Build Queue</h2>
+        <div id="queue">(none)</div>
+      </div>
+
+      <!-- Right: Debug / Output -->
+      <div class="card">
+        <h2>Debug</h2>
+        <div class="muted">Raw server snapshots (temporary)</div>
+        <pre id="out">(waiting)</pre>
+      </div>
+    </div>
+  </div>
 
 <script>
   const out = document.getElementById("out");
 
-  async function refresh() {
-    const r = await fetch("/api/state");
-    const data = await r.json();
-    out.textContent = JSON.stringify(data, null, 2);
+  const helloBtn = document.getElementById("helloBtn");
+  const saveBtn = document.getElementById("saveBtn");
+  const loadBtn = document.getElementById("loadBtn");
+  const logoutBtn = document.getElementById("logoutBtn");
+
+  const userPill = document.getElementById("userPill");
+
+  const stationName = document.getElementById("stationName");
+  const credits = document.getElementById("credits");
+  const power = document.getElementById("power");
+  const rateCredits = document.getElementById("rateCredits");
+  const ratePower = document.getElementById("ratePower");
+
+  const buildSolarBtn = document.getElementById("buildSolarBtn");
+  const buildMsg = document.getElementById("buildMsg");
+  const queueEl = document.getElementById("queue");
+
+  function fmt(n) {
+    if (typeof n !== "number") return String(n);
+    return n.toFixed(2);
   }
 
-  async function buildSolar() {
-  const r = await fetch("/api/build/solar_array", { method: "POST" });
-  const data = await r.json();
-  out.textContent = JSON.stringify(data, null, 2);
-}
+  function renderState(state) {
+    // Debug
+    out.textContent = JSON.stringify(state, null, 2);
 
+    const st = state.station;
+    if (!st) return;
 
-  // refresh immediately, then every 1 second
-  refresh();
-  setInterval(refresh, 1000);
+    stationName.textContent = st.name;
+
+    credits.textContent = fmt(st.resources?.credits ?? 0);
+    power.textContent = fmt(st.resources?.power ?? 0);
+
+    rateCredits.textContent = fmt(st.rates?.credits ?? 0);
+    ratePower.textContent = fmt(st.rates?.power ?? 0);
+
+    // Build Queue
+    const q = st.build_queue ?? st.buildQueue ?? [];
+    if (!q.length) {
+      queueEl.textContent = "(none)";
+    } else {
+      queueEl.innerHTML = "";
+      const now = Date.now() / 1000;
+      for (const job of q) {
+        const moduleId = job.module_id ?? job.moduleId ?? "unknown";
+        const finishAt = job.finish_at ?? job.finishAt ?? 0;
+        const remaining = Math.max(0, finishAt - now);
+
+        const div = document.createElement("div");
+        div.className = "queue-item";
+        div.textContent = `${moduleId} — ${remaining.toFixed(1)}s remaining`;
+        queueEl.appendChild(div);
+      }
+    }
+  }
+
+  async function refreshMe() {
+    const r = await fetch("/api/me");
+    const data = await r.json();
+    if (data.username) userPill.textContent = data.username;
+    else if (data.user_id) userPill.textContent = `User #${data.user_id}`;
+    else userPill.textContent = "Not logged in";
+  }
+
+  async function refreshState() {
+    const r = await fetch("/api/state");
+    if (r.status === 401) {
+      location.href = "/login";
+      return;
+    }
+    const data = await r.json();
+    renderState(data);
+  }
+
+  helloBtn.onclick = async () => {
+    const r = await fetch("/api/hello");
+    const data = await r.json();
+    buildMsg.textContent = `Hello: ${data.message}`;
+  };
+
+  logoutBtn.onclick = async () => {
+    await fetch("/api/logout", { method: "POST" });
+    location.href = "/login";
+  };
+
+  saveBtn.onclick = async () => {
+    const r = await fetch("/api/save_station", { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+    buildMsg.textContent = r.ok ? `Saved (id=${data.station_id})` : "Save failed";
+    await refreshState();
+  };
+
+  loadBtn.onclick = async () => {
+    const r = await fetch("/api/load_station");
+    const data = await r.json().catch(() => ({}));
+    buildMsg.textContent = (r.ok && data.ok) ? "Loaded latest" : "No save found";
+    await refreshState();
+  };
+
+  buildSolarBtn.onclick = async () => {
+    const r = await fetch("/api/build/solar_array", { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+    buildMsg.textContent = data.ok ? "Queued solar_array" : `Build failed: ${data.reason || "?"}`;
+    await refreshState();
+  };
+
+  // start
+  refreshMe();
+  refreshState();
+  setInterval(refreshMe, 5000);
+  setInterval(refreshState, 1000);
 </script>
 </body>
 </html>

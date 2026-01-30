@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Register</title></head>
+<body>
+  <h1>Register</h1>
+
+  <label>Username <input id="u"></label><br>
+  <label>Password <input id="p" type="password"></label><br>
+  <button id="btn">Create account</button>
+
+  <p id="msg"></p>
+  <p><a href="/login">Back to login</a></p>
+
+  <script>
+    const msg = document.getElementById("msg");
+    document.getElementById("btn").onclick = async () => {
+      msg.textContent = "";
+      const r = await fetch("/api/register", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({username: u.value, password: p.value})
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.ok) location.href = "/login";
+      else msg.textContent = data.detail || "Register failed";
+    };
+  </script>
+</body>
+</html>

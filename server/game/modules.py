@@ -1,8 +1,9 @@
 MODULES = {
     "solar_array": {
         "name": "Solar Array",
-        "cost": {"credits": 50.0},
+        "cost": {"credits": 50},
         "rates": {"power": 1.5},
-        "unique": True
+        "build_time": 10.0,  # seconds
+        "max_per_station": 3,
     },
 }

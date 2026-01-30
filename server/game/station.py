@@ -1,4 +1,5 @@
 import json
+import time
 
 from server.game.modules import MODULES
 
@@ -13,6 +14,8 @@ class Station:
 
         # Installed module ids
         self.modules: list[str] = []
+
+        self.build_queue: list[dict] = []
 
         # Current computed rates (base + modules)
         self.rates = dict(self.base_rates)
@@ -35,28 +38,54 @@ class Station:
         for key, amount in cost.items():
             self.resources[key] = self.resources.get(key, 0.0) - float(amount)
 
+    def install_module(self, module_id: str):
+        self.modules.append(module_id)
+
+        for res, delta in MODULES[module_id]["rates"].items():
+            self.rates[res] = self.rates.get(res, 0) + delta
+
     def build(self, module_id: str) -> tuple[bool, str]:
-        if module_id not in MODULES:
+        module = MODULES.get(module_id)
+        if not module:
             return False, "unknown_module"
 
-        module = MODULES[module_id]
+        # max per station
+        count = self.modules.count(module_id)
+        if count >= module.get("max_per_station", 999):
+            return False, "max_reached"
 
-        # Optional uniqueness rule
-        if module.get("unique", False) and module_id in self.modules:
-            return False, "already_built"
+        # check cost
+        for res, cost in module["cost"].items():
+            if self.resources.get(res, 0) < cost:
+                return False, "not_enough_resources"
 
-        cost = module.get("cost", {})
-        if not self.can_afford(cost):
-            return False, "insufficient_resources"
+        # pay immediately
+        for res, cost in module["cost"].items():
+            self.resources[res] -= cost
 
-        self.pay_cost(cost)
-        self.modules.append(module_id)
-        self.recompute_rates()
-        return True, "built"
+        now = time.time()
+        self.build_queue.append({
+            "module_id": module_id,
+            "started_at": now,
+            "finish_at": now + module["build_time"],
+        })
+
+        return True, "queued"
 
     def tick(self, dt: float) -> None:
         for k, rate in self.rates.items():
             self.resources[k] = self.resources.get(k, 0.0) + rate * dt
+
+        now = time.time()
+        completed = []
+
+        for job in self.build_queue:
+            if now >= job["finish_at"]:
+                completed.append(job)
+
+        for job in completed:
+            self.build_queue.remove(job)
+            self.install_module(job["module_id"])
 
     def snapshot(self) -> dict:
         return {
@@ -64,6 +93,7 @@ class Station:
             "resources": self.resources,
             "rates": self.rates,
             "modules": list(self.modules),
+            "build_queue": self.build_queue,
         }
     
     def to_dict(self) -> dict:

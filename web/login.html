@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Login</title></head>
+<body>
+  <h1>Login</h1>
+
+  <label>Username <input id="u"></label><br>
+  <label>Password <input id="p" type="password"></label><br>
+  <button id="btn">Login</button>
+
+  <p id="msg"></p>
+  <p><a href="/register">Register</a></p>
+
+  <script>
+    const msg = document.getElementById("msg");
+    document.getElementById("btn").onclick = async () => {
+      msg.textContent = "";
+      const r = await fetch("/api/login", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({username: u.value, password: p.value})
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.ok) location.href = "/";
+      else msg.textContent = data.detail || "Login failed";
+    };
+  </script>
+</body>
+</html>
+
