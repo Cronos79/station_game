@@ -12,18 +12,29 @@ from server.game.db import get_conn
 from server.sim.entities import Station
 from server.sim.materials import is_valid_material
 
+from server.sim.modules import get_module
+
 @dataclass
 class UniverseConfig:
     tick_dt: float = 1.0        # sim seconds per tick
     autosave_dt: float = 20.0   # save every N sim seconds
     catchup_max: float = 300.0  # max offline seconds to simulate
 
-
 class Universe:
     """
     Universe stored as a single JSON blob in universe_state (Option 1).
     This class keeps an in-memory copy (self.state) and periodically saves it.
     """
+
+    BASE_STATION_STATS = {
+        "slot_cap": 4.0,
+        "power_cap": 8.0,   # built-in starter reactor
+        "crew_cap": 5.0,    # built-in starter crew capacity
+        "cargo_cap": 25.0,
+        "dock_cap": 0.0,
+        "defense": 0.0,
+        "scan_level": 0.0,
+    }
 
     def __init__(self, cfg: UniverseConfig | None = None):
         self.cfg = cfg or UniverseConfig()
@@ -47,6 +58,158 @@ class Universe:
 
         # Simple lock so tick/save and API reads don't fight
         self._lock = asyncio.Lock()
+
+    def compute_station_stats(self, station: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Derived station stats from base + installed module effects.
+
+        Returns:
+        - caps: totals after module effects
+        - usage: power_used, crew_used, slots_used
+        - modules: module ids
+        """
+        stats = dict(self.BASE_STATION_STATS)
+
+        power_used = 0.0
+        crew_used = 0.0
+        slots_used = 0.0
+
+        module_ids = station.get("modules") or []
+        if not isinstance(module_ids, list):
+            module_ids = []
+
+        for mid in module_ids:
+            m = get_module(str(mid))
+            if not m:
+                continue  # ignore unknown module ids for now
+
+            # Apply effects (power_cap, crew_cap, cargo_cap, defense, etc.)
+            for k, v in (m.effects or {}).items():
+                stats[k] = float(stats.get(k, 0.0)) + float(v)
+
+            # Track usage (what it costs to keep it running)
+            if m.power_delta < 0:
+                power_used += -float(m.power_delta)  # consumption
+            crew_used += float(m.crew_required)
+            slots_used += float(m.slot_cost)
+
+        return {
+            "caps": stats,
+            "usage": {
+                "power_used": power_used,
+                "crew_used": crew_used,
+                "slots_used": slots_used,
+            },
+            "modules": [str(x) for x in module_ids],
+        }
+    
+    def _find_station_mut(self, station_id: int) -> Dict[str, Any]:
+        """
+        Find the *actual* station dict inside self.state (mutable reference).
+        Raises ValueError if not found.
+        """
+        for s in self.state.get("stations", []):
+            if int(s.get("id", -1)) == int(station_id):
+                return s
+        raise ValueError(f"station_not_found: {station_id}")
+
+
+    def _preview_stats_after_add(self, station: Dict[str, Any], module_id: str) -> Dict[str, Any]:
+        """
+        Return derived stats *as if* module_id were added to station.modules.
+        Does not mutate the station.
+        """
+        # Copy the station shallowly, and copy the modules list (so we don't mutate original)
+        temp = dict(station)
+        modules = list(temp.get("modules") or [])
+        modules.append(module_id)
+        temp["modules"] = modules
+
+        return self.compute_station_stats(temp)
+
+
+    def _budget_problems(self, derived: Dict[str, Any]) -> list[str]:
+        """
+        Return a list of human-readable budget problems.
+        Empty list means OK.
+        """
+        caps = derived.get("caps", {}) or {}
+        usage = derived.get("usage", {}) or {}
+
+        def f(x: Any) -> float:
+            try:
+                return float(x)
+            except Exception:
+                return 0.0
+
+        problems: list[str] = []
+
+        slots_used = f(usage.get("slots_used"))
+        slots_cap = f(caps.get("slot_cap"))
+        if slots_used > slots_cap + 1e-9:
+            problems.append(f"Slots: {slots_used:.2f} / {slots_cap:.2f}")
+
+        crew_used = f(usage.get("crew_used"))
+        crew_cap = f(caps.get("crew_cap"))
+        if crew_used > crew_cap + 1e-9:
+            problems.append(f"Crew: {crew_used:.2f} / {crew_cap:.2f}")
+
+        power_used = f(usage.get("power_used"))
+        power_cap = f(caps.get("power_cap"))
+        if power_used > power_cap + 1e-9:
+            problems.append(f"Power: {power_used:.2f} / {power_cap:.2f}")
+
+        return problems
+
+    async def add_module_to_station(self, station_id: int, module_id: str) -> None:
+        """
+        Server-authoritative install:
+        - station must exist
+        - module_id must exist
+        - must not already be installed
+        - must not exceed budgets after install
+        """
+        module_id = str(module_id).strip()
+        if not module_id:
+            raise ValueError("module_id_required")
+
+        if not get_module(module_id):
+            raise ValueError(f"module_not_found: {module_id}")
+
+        async with self._lock:
+            station = self._find_station_mut(station_id)
+
+            mods = station.get("modules")
+            if not isinstance(mods, list):
+                mods = []
+                station["modules"] = mods
+
+            if module_id in mods:
+                raise ValueError(f"module_already_installed: {module_id}")
+
+            derived_preview = self._preview_stats_after_add(station, module_id)
+            problems = self._budget_problems(derived_preview)
+            if problems:
+                raise ValueError("over_budget: " + "; ".join(problems))
+
+            mods.append(module_id)
+            self.save()
+
+    async def remove_module_from_station(self, station_id: int, module_id: str) -> None:
+        module_id = str(module_id).strip()
+        async with self._lock:
+            station = self._find_station_mut(station_id)
+
+            mods = station.get("modules")
+            if not isinstance(mods, list):
+                station["modules"] = []
+                raise ValueError(f"module_not_installed: {module_id}")
+
+            if module_id not in mods:
+                raise ValueError(f"module_not_installed: {module_id}")
+
+            mods.remove(module_id)
+            self.save()    
 
     # ----------------------------
     # Econ
@@ -157,6 +320,10 @@ class Universe:
                         s["credits"] = 0.0
                         changed = True
 
+                    if "modules" not in s or not isinstance(s.get("modules"), list):
+                        s["modules"] = []
+                        changed = True
+
                     if changed:
                         self.save()
 
@@ -179,6 +346,7 @@ class Universe:
                     "iron_ore": 5.0,
                     "copper_ore": 2.0,
                 },
+                modules=[],
             )
 
             stations.append(st.to_dict())

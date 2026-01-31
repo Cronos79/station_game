@@ -1,31 +1,68 @@
 <!doctype html>
-<html>
+<html lang="en">
 
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Station Game</title>
+  <link rel="stylesheet" href="/static/app.css" />
 </head>
 
 <body>
-  <h1>Station Game</h1>
+  <div class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <div>
+        <div>Station Game <small>dev</small></div>
+        <div class="muted" style="font-size:12px;">Persistent universe • server-authoritative</div>
+      </div>
+    </div>
+    <div class="account" id="accountArea">
+      <span class="muted">Loading account…</span>
+    </div>
+  </div>
 
-  <pre id="me">(loading...)</pre>
-  <button id="logoutBtn">Logout</button>
+  <div class="subnav" id="tabs">
+    <div class="tab active" data-page="news">News</div>
+    <div class="tab" data-page="universe">Universe</div>
+    <div class="tab" data-page="stations">Stations</div>
+    <div class="tab" data-page="modules">Modules</div>
+    <div class="tab" data-page="fleets">Fleets</div>
+    <div class="tab" data-page="trade">Trade</div>
+    <div class="tab" data-page="diplomacy">Diplomacy</div>
+  </div>
 
-  <script>
-    async function refreshMe() {
-      const r = await fetch("/api/me");
-      const data = await r.json();
-      document.getElementById("me").textContent = JSON.stringify(data, null, 2);
-    }
+  <div class="layout">
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title" id="sideTitle">News Feed</div>
+          <div class="panel-sub" id="sideSub">Universe updates & patch notes</div>
+        </div>
+        <button class="btn" id="refreshBtn">Refresh</button>
+      </div>
+      <div class="panel-body" id="sideBody">
+        <div class="muted">Loading…</div>
+      </div>
+    </div>
 
-    document.getElementById("logoutBtn").onclick = async () => {
-      await fetch("/api/logout", { method: "POST" });
-      location.href = "/login";
-    };
+    <div class="panel">
+      <div class="panel-header">
+        <div>
+          <div class="panel-title" id="mainTitle">Welcome</div>
+          <div class="panel-sub" id="mainSub">Pick a tab to explore the universe</div>
+        </div>
+        <div class="row">
+          <button class="btn btn-primary" id="ensureStationBtn" style="display:none;">Ensure Player Station</button>
+        </div>
+      </div>
+      <div class="panel-body" id="mainBody">
+        <div class="muted">Loading…</div>
+      </div>
+    </div>
+  </div>
 
-    refreshMe();
-  </script>
+  <script src="/static/app.js"></script>
 </body>
 
 </html>

@@ -20,7 +20,7 @@ class Station:
     credits: float
     # materials stored as a dict (material_id -> amount)
     inventory: Dict[str, float]
-
+    modules: list[str]
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -39,6 +39,11 @@ class Station:
         # Make sure values are floats (JSON might store ints)
         inv2 = {str(k): float(v) for k, v in inv.items()}
 
+        mods = d.get("modules")
+        if not isinstance(mods, list):
+            mods = []
+        mods2 = [str(x) for x in mods]
+
         return Station(
             id=int(d["id"]),
             name=str(d["name"]),
@@ -48,4 +53,5 @@ class Station:
             y=float(d["y"]),
             credits=float(d.get("credits", 0.0)),
             inventory=inv2,
+            modules=mods2,
         )

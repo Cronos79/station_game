@@ -9,9 +9,13 @@ from server.game.db import get_conn, init_db
 from server.game.auth import hash_password, verify_password
 from server.sim.universe import Universe, UniverseConfig
 from server.sim.materials import MATERIALS
+from server.sim.modules import MODULES
+
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 SESSION_COOKIE = "station_session"
 
@@ -147,8 +151,13 @@ def api_me(request: Request):
 
 @app.get("/api/universe")
 async def api_universe():
-    return {"ok": True, "universe": await universe.snapshot_async()}
+    snap = await universe.snapshot_async()
 
+    # Attach derived station stats (server-side view)
+    for s in snap.get("stations", []):
+        s["derived"] = universe.compute_station_stats(s)
+
+    return {"ok": True, "universe": snap}
 
 @app.post("/api/universe/advance")
 def api_universe_advance(payload: dict = Body(...)):
@@ -190,3 +199,65 @@ def api_materials():
 async def api_bodies():
     snap = await universe.snapshot_async()
     return {"ok": True, "bodies": snap.get("bodies", [])}
+
+@app.get("/api/modules")
+def api_modules():
+    return {
+        "ok": True,
+        "modules": [
+            {
+                "id": m.id,
+                "name": m.name,
+                "category": m.category,
+                "power_delta": m.power_delta,
+                "crew_required": m.crew_required,
+                "slot_cost": m.slot_cost,
+                "build_time": m.build_time,
+                "cost": m.cost,
+                "effects": m.effects,
+            }
+            for m in MODULES.values()
+        ],
+    }
+
+@app.post("/api/debug/stations/{station_id}/modules/add")
+async def api_debug_add_module(station_id: int, payload: dict = Body(...), request: Request = None):
+    user_id = get_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="not_logged_in")
+
+    module_id = str(payload.get("module_id") or "").strip()
+    if not module_id:
+        raise HTTPException(status_code=400, detail="module_id_required")
+
+    snap = await universe.snapshot_async()
+    st = next((x for x in snap.get("stations", []) if int(x.get("id", -1)) == station_id), None)
+    if not st or int(st.get("owner_user_id", -1)) != int(user_id):
+        raise HTTPException(status_code=403, detail="not_station_owner")
+    
+    try:
+        await universe.add_module_to_station(station_id, module_id)
+    except ValueError as e:
+        msg = str(e)
+        if msg.startswith("station_not_found") or msg.startswith("module_not_found"):
+            raise HTTPException(status_code=404, detail=msg)
+        else:
+            raise HTTPException(status_code=400, detail=msg)
+    return {"ok": True}
+
+@app.post("/api/debug/stations/{station_id}/modules/remove")
+async def api_debug_remove_module(station_id: int, payload: dict = Body(...), request: Request = None):
+    user_id = get_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="not_logged_in")
+
+    module_id = str(payload.get("module_id") or "").strip()
+    if not module_id:
+        raise HTTPException(status_code=400, detail="module_id_required")
+
+    try:
+        await universe.remove_module_from_station(station_id, module_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return {"ok": True}
