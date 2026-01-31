@@ -7,21 +7,28 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from server.game.db import get_conn, init_db
 from server.game.auth import hash_password, verify_password
+from server.sim.universe import Universe, UniverseConfig
+from server.sim.materials import MATERIALS
 
 app = FastAPI()
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
 SESSION_COOKIE = "station_session"
 
+universe = Universe(UniverseConfig(tick_dt=1.0, autosave_dt=20.0, catchup_max=300.0))
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     init_db()
-    print("🚀 Server starting up")
+    universe.load()
+    await universe.start()
+    await universe.ensure_bootstrap_world()
+    print("🚀 Server starting up (universe ticking)")
 
 
 @app.on_event("shutdown")
-def on_shutdown():
+async def on_shutdown():
+    await universe.stop()
     print("🛑 Server shutting down cleanly")
 
 
@@ -137,3 +144,49 @@ def api_me(request: Request):
         row = conn.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
 
     return {"ok": True, "user_id": user_id, "username": row["username"] if row else None}
+
+@app.get("/api/universe")
+async def api_universe():
+    return {"ok": True, "universe": await universe.snapshot_async()}
+
+
+@app.post("/api/universe/advance")
+def api_universe_advance(payload: dict = Body(...)):
+    # Debug endpoint for now.
+    # Example body: { "dt": 5 }
+    dt = float(payload.get("dt", 1.0))
+    if dt < 0:
+        raise HTTPException(status_code=400, detail="dt_must_be_non_negative")
+
+    universe.advance(dt)
+    universe.save()
+    return {"ok": True, "universe": universe.snapshot()}
+
+@app.post("/api/universe/ensure_player_station")
+async def api_ensure_player_station(request: Request):
+    user_id = get_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="not_logged_in")
+
+    with get_conn() as conn:
+        row = conn.execute("SELECT username FROM users WHERE id=?", (user_id,)).fetchone()
+
+    username = row["username"] if row else "Player"
+    station_id = await universe.ensure_player_station(user_id, username)
+
+    return {"ok": True, "station_id": station_id}
+
+@app.get("/api/materials")
+def api_materials():
+    return {
+        "ok": True,
+        "materials": [
+            {"id": m.id, "name": m.name, "category": m.category}
+            for m in MATERIALS.values()
+        ]
+    }
+
+@app.get("/api/bodies")
+async def api_bodies():
+    snap = await universe.snapshot_async()
+    return {"ok": True, "bodies": snap.get("bodies", [])}
