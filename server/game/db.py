@@ -1,4 +1,6 @@
 import sqlite3
+import json
+import time
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "game.db"
@@ -53,3 +55,17 @@ def init_db() -> None:
             last_update REAL NOT NULL
         )
         """)
+
+        # Ensure universe_state has its singleton row (id=1)
+        row = conn.execute("SELECT id FROM universe_state WHERE id=1").fetchone()
+        if row is None:
+            default_state = {
+                "version": 1,
+                "sim_time": 0.0,
+                "stations": [],
+                "events": []
+            }
+            conn.execute(
+                "INSERT INTO universe_state (id, state_json, last_update) VALUES (1, ?, ?)",
+                (json.dumps(default_state), time.time())
+            )
