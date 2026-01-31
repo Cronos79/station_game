@@ -84,12 +84,14 @@ These will be added incrementally.
 - Virtual environment recommended
 
 ### Install & Run
-```bash
+bash
 uvicorn server.app:app --reload
 
 Server will start at:
 
-http://127.0.0.1:8000
+http:://127.0.0.1:8000
+
+---
 
 ## Project Status
 
@@ -104,6 +106,8 @@ Build costs & build queue
 Event-based construction
 
 Mining & logistics (later)
+
+---
 
 ## License
 

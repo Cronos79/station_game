@@ -46,6 +46,80 @@ Early gameplay focuses on survival and specialization:
 
 ---
 
+## Station & Module Model (v1)
+
+Stations are **infrastructure platforms**, not cities.
+
+They convert materials, enable logistics, and project power, but do not
+generate raw resources on their own.
+
+---
+
+### Crew (v1)
+- Stations use **crew**, not population
+- Crew is a simple capacity-based resource
+- Modules require crew to operate
+- No births, deaths, or morale in v1
+
+Stations start with a small crew capacity and must build habitat modules
+to expand.
+
+---
+
+### Power (v1)
+- Power is a **budget**, not a stored resource
+- Modules consume or produce power
+- Exceeding power capacity causes modules to shut down or lose efficiency
+
+---
+
+### Modules (v1 Philosophy)
+Each module:
+- Consumes power
+- Requires crew
+- Provides one primary benefit
+
+Modules fall into categories:
+- Infrastructure (power, storage, crew)
+- Industry (refining, manufacturing)
+- Logistics & Info (docking, scanning)
+- Defense (shields, point defense)
+- Commerce (trade hubs, taxes – later)
+
+---
+
+### Module Costs
+- Modules do **not** consume raw ore
+- Costs are paid in refined materials and parts
+- This enforces logistics and refining gameplay
+
+---
+
+### Slots & Scale
+- Stations have limited module slots
+- Planets > Moons > Stations in capacity and defense
+- Stations are small, specialized, and expendable
+- Planets are major economic and defensive hubs
+
+---
+
+### Upgrades
+- Upgrades improve efficiency, not behavior
+- Same module, better output
+- No extra slot cost
+
+---
+
+### Ships & Movement
+Ship mobility tiers:
+- Local (drones)
+- System (non-FTL)
+- Interstellar (FTL)
+
+FTL gates allow non-FTL ships to travel between systems and act as strategic choke points.
+
+---
+
 ## Resources & Materials (v1)
 
 ### Important Clarification
