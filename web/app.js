@@ -5,6 +5,7 @@ const state = {
     me: null,
     universe: null,
     modules: null,
+    myStations: [],
 
     page: "news",
     selectedStationId: null,
@@ -47,7 +48,7 @@ async function apiPost(path, body) {
 }
 
 function getStations() {
-    return state.universe?.universe?.stations ?? [];
+    return state.myStations ?? [];
 }
 
 function getSelectedStation() {
@@ -193,7 +194,7 @@ function renderNews() {
     document.getElementById("mainTitle").textContent = "Welcome";
     document.getElementById("mainSub").textContent = "Universe-first station game (dev)";
 
-    const stationCount = u?.stations?.length ?? 0;
+    const stationCount = getStations().length;
     const bodyCount = u?.bodies?.length ?? 0;
     const moduleCount = state.modules?.modules?.length ?? 0;
 
@@ -488,6 +489,21 @@ async function refreshAll() {
 
     try { state.modules = await apiGet("/api/modules"); }
     catch { state.modules = null; }
+
+    state.myStations = [];
+
+    if (state.me && state.me.user_id) {
+        // Optional but recommended: auto-ensure station on load
+        try { await apiPost("/api/universe/ensure_player_station", {}); }
+        catch { /* ignore */ }
+
+        try {
+            const r = await apiGet("/api/my/stations");
+            state.myStations = r.stations || [];
+        } catch {
+            state.myStations = [];
+        }
+    }
 
     // Keep selected station valid after refresh
     const stations = getStations();
