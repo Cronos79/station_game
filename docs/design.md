@@ -25,8 +25,7 @@ The following are intentionally excluded from v1:
 ## Core Gameplay Loop
 **Scan → Extract → Move → Transform → Build → Defend / Expand**
 
-Progress is driven by **materials + logistics + risk**,  
-**not** by passive resource generation.
+Progress is driven by **materials + logistics + risk**, not by passive resource generation.
 
 ---
 
@@ -50,8 +49,7 @@ Early gameplay focuses on survival and specialization:
 
 Stations are **infrastructure platforms**, not cities.
 
-They convert materials, enable logistics, and project power, but do not
-generate raw resources on their own.
+They convert materials, enable logistics, and project power, but do not generate raw resources on their own.
 
 ---
 
@@ -61,22 +59,22 @@ generate raw resources on their own.
 - Modules require crew to operate
 - No births, deaths, or morale in v1
 
-Stations start with a small crew capacity and must build habitat modules
-to expand.
+Stations start with a small crew capacity and must build habitat modules to expand.
 
 ---
 
 ### Power (v1)
 - Power is a **budget**, not a stored resource
 - Modules consume or produce power
-- Exceeding power capacity causes modules to shut down or lose efficiency
+- Exceeding power capacity blocks installs (v1 rule: cannot exceed budgets)
 
 ---
 
 ### Modules (v1 Philosophy)
 Each module:
-- Consumes power
+- Consumes or produces power (power delta)
 - Requires crew
+- Consumes station slot capacity
 - Provides one primary benefit
 
 Modules fall into categories:
@@ -89,7 +87,7 @@ Modules fall into categories:
 ---
 
 ### Module Costs
-- Modules do **not** consume raw ore
+- Modules do **not** consume raw ore directly
 - Costs are paid in refined materials and parts
 - This enforces logistics and refining gameplay
 
@@ -97,9 +95,9 @@ Modules fall into categories:
 
 ### Slots & Scale
 - Stations have limited module slots
-- Planets > Moons > Stations in capacity and defense
+- Planets > Moons > Stations in capacity and defense (future)
 - Stations are small, specialized, and expendable
-- Planets are major economic and defensive hubs
+- Planets are major economic and defensive hubs (future)
 
 ---
 
@@ -131,22 +129,19 @@ Instead, resources are represented as **material types**.
 - **Raw materials (ores)**  
   e.g. `iron_ore`, `copper_ore`, later `nickel_ore`, `titanium_ore`
 - **Refined materials**  
-  e.g. `alloy_plate`
+  e.g. `iron_bar`, `copper_bar`, `alloy_plate`, `glass_pane`
 - **Manufactured parts**  
-  e.g. `parts_basic`
+  e.g. `computer_chip`, `computer_screen`, `parts_basic` (names may evolve)
 
-### Current v1 Material Registry (implemented)
-- Iron Ore
-- Copper Ore
-- Alloy Plate
-- Basic Parts
+### Inventory Format (implemented)
+Materials are stored in station inventories as:
 
-Materials are stored in **station inventories** as:
 json
 "inventory": {
   "iron_ore": 5,
   "copper_ore": 2
 }
+
 
 Celestial Bodies (v1)
 
@@ -182,47 +177,58 @@ Docking / hangar capacity
 
 Defense rating
 
-Modules (v1 – definitions first)
+Scan level
 
-Modules are definitions + costs before build logic.
+Modules (v1 – definitions + build queue)
+Module Definitions (implemented)
 
-Each module has:
+Modules are data definitions with:
 
-material cost (using material registry)
+id / name / category
 
-build time
+power delta
 
-requirements (power, prerequisites)
+crew required
 
-maintenance (later)
+slot cost
 
-Starter module definitions:
+build time (seconds)
 
-Solar Array
+material cost (from material registry)
 
-Battery Bank
+effects (caps, scan level, defense, etc.)
 
-Habitat Pod
+Build Queue (Option A – implemented and working)
 
-Hydroponics
+Builds are server-authoritative timed events.
 
-Water Recycler
+Rules (implemented):
 
-Storage Bay
+One build at a time per station
 
-Docking Clamp
+Costs are paid when queued (materials are spent immediately)
 
-Basic Refinery
+Budget checks are validated upfront (preview after completion)
 
-Workshop
+A build schedules an event:
 
-Shield Emitter
+type = "build_module_complete"
 
-Point Defense
+time = sim_time + build_time
 
-Scanner Array
+When the event fires, the module is installed (idempotent + budget-safe)
 
-Ships (v1 – event-based)
+Order → Event → Outcome (implemented path):
+
+Client requests build: POST /api/stations/{id}/build/module
+
+Server validates ownership + rules and queues an event
+
+Universe tick loop advances sim_time and processes due events
+
+Completion event installs module into station modules list
+
+Ships (v1 – event-based, planned)
 
 Ships are timed event actors, not continuously simulated:
 
@@ -235,18 +241,31 @@ Patrol Skiff (abstract defense)
 No per-tick ship simulation.
 
 Universe Model (Implemented Core)
+Universe State (implemented)
 
-Universe is the root simulation object.
+Universe is the root simulation object stored as a single JSON snapshot in SQLite.
+
+Includes:
+
+sim_time
+
+stations
+
+bodies
+
+events
 
 Implemented Entities
 
 Station (player-owned)
 
-CelestialBody (asteroid belts implemented)
+CelestialBody (asteroid belts)
 
 Material registry
 
-Universe state (JSON snapshot)
+Module registry
+
+Event queue (module builds)
 
 Planned Entities
 
@@ -256,11 +275,9 @@ Fleets / Ships
 
 Factions
 
-Event Queue
-
 Contracts / Markets
 
-Time & Simulation (Option A – Implemented)
+Time & Simulation (Option A – implemented)
 Core Behavior
 
 Fixed tick loop (1.0s)
@@ -285,7 +302,7 @@ scheduled events
 
 All material gain happens via events (mining, trade, salvage).
 
-Persistence (v1 – Implemented)
+Persistence (v1 – implemented)
 
 SQLite
 
@@ -295,7 +312,7 @@ Autosave + crash-safe
 
 last_update used for bounded catch-up
 
-Multiplayer
+Multiplayer (v1)
 
 Universe runs regardless of player activity
 
@@ -306,6 +323,7 @@ Orders become events
 No continuous player simulation
 
 v1 Milestones (Updated)
+
 ✅ Milestone 1: Universe Skeleton (DONE)
 
 Universe exists and advances time
@@ -322,15 +340,15 @@ Material registry
 
 Celestial bodies with material availability
 
-🔜 Milestone 2: Module Definitions + Build Queue
+✅ Milestone 2: Module Definitions + Build Queue (DONE)
 
 Module definitions with material costs
 
-Build queue stored as events
+Build queue stored as timed events
 
-Materials spent on queue, not per tick
+Materials spent on queue (not per tick)
 
-Build completion modifies station
+Build completion installs module into station
 
 🔜 Milestone 3: Mining & Logistics
 

@@ -52,6 +52,10 @@ The game is built around a **persistent, server-authoritative universe** that co
 - Celestial bodies endpoint
 - Player station creation
 
+### Build Queue
+- Modules are put into a queue and built after x amout of time.
+- You must have the required resources to put a module into the queue.
+
 ---
 
 ## Explicit Non-Features (Yet)
@@ -59,7 +63,6 @@ The game is built around a **persistent, server-authoritative universe** that co
 These are **intentionally not implemented yet**:
 - No mining logic
 - No trade system
-- No build queue
 - No ships or fleets
 - No combat or damage
 - No AI factions
