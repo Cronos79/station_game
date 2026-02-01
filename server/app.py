@@ -10,6 +10,7 @@ from server.game.auth import hash_password, verify_password
 from server.sim.universe import Universe, UniverseConfig
 from server.sim.materials import MATERIALS
 from server.sim.modules import MODULES
+from server.sim.modules import MODULES, get_module
 
 from fastapi.staticfiles import StaticFiles
 
@@ -237,6 +238,46 @@ def api_modules():
         ],
     }
 
+@app.post("/api/stations/{station_id}/build/module")
+async def api_build_module(station_id: int, payload: dict = Body(...), request: Request = None):
+    user_id = get_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="not_logged_in")
+
+    module_id = str(payload.get("module_id") or "").strip()
+    if not module_id:
+        raise HTTPException(status_code=400, detail="module_id_required")
+
+    # Ownership check
+    snap = await universe.snapshot_async()
+    st = next((x for x in snap.get("stations", []) if int(x.get("id", -1)) == int(station_id)), None)
+    if not st:
+        raise HTTPException(status_code=404, detail="station_not_found")
+    if int(st.get("owner_user_id", -1)) != int(user_id):
+        raise HTTPException(status_code=403, detail="not_station_owner")
+
+    try:
+        event_id = await universe.queue_build_module(station_id, module_id)
+    except ValueError as e:
+        msg = str(e)
+
+        if msg.startswith("module_not_found") or msg.startswith("station_not_found"):
+            raise HTTPException(status_code=404, detail=msg)
+
+        if msg in ("module_id_required",):
+            raise HTTPException(status_code=400, detail=msg)
+
+        # these are normal validation errors
+        raise HTTPException(status_code=400, detail=msg)
+
+    # Return some timing info for UI
+    now_sim = float(universe.state.get("sim_time", 0.0))
+    m = get_module(module_id)
+    finishes_at = now_sim + float(m.build_time) if m else None
+
+    return {"ok": True, "event_id": event_id, "finishes_at": finishes_at}
+
+
 @app.post("/api/debug/stations/{station_id}/modules/add")
 async def api_debug_add_module(station_id: int, payload: dict = Body(...), request: Request = None):
     user_id = get_user_id_from_request(request)
@@ -278,3 +319,71 @@ async def api_debug_remove_module(station_id: int, payload: dict = Body(...), re
         raise HTTPException(status_code=404, detail=str(e))
 
     return {"ok": True}
+
+@app.post("/api/debug/events/install_module")
+async def api_debug_event_install_module(payload: dict = Body(...), request: Request = None):
+    user_id = get_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="not_logged_in")
+
+    station_id = int(payload.get("station_id") or 0)
+    module_id = str(payload.get("module_id") or "").strip()
+    delay = float(payload.get("delay") or 5.0)
+
+    if station_id <= 0:
+        raise HTTPException(status_code=400, detail="station_id_required")
+    if not module_id:
+        raise HTTPException(status_code=400, detail="module_id_required")
+    if delay < 0:
+        raise HTTPException(status_code=400, detail="delay_must_be_non_negative")
+
+    # Ownership check (so you can't schedule events for other people)
+    snap = await universe.snapshot_async()
+    st = next((x for x in snap.get("stations", []) if int(x.get("id", -1)) == station_id), None)
+    if not st or int(st.get("owner_user_id", -1)) != int(user_id):
+        raise HTTPException(status_code=403, detail="not_station_owner")
+
+    now_sim = float(universe.state.get("sim_time", 0.0))
+    fire_at = now_sim + delay
+
+    # IMPORTANT: Universe.enqueue_event is not async; protect with lock here.
+    async with universe._lock:
+        eid = universe.enqueue_event(
+            fire_at,
+            "install_module",
+            {"station_id": station_id, "module_id": module_id},
+        )
+        universe.save()
+
+    return {"ok": True, "event_id": eid, "fires_at": fire_at}
+
+@app.post("/api/debug/stations/{station_id}/grant")
+async def api_debug_grant(station_id: int, payload: dict = Body(...), request: Request = None):
+    user_id = get_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="not_logged_in")
+
+    material_id = str(payload.get("material_id") or "").strip()
+    amount = float(payload.get("amount", 0))
+
+    if not material_id or amount <= 0:
+        raise HTTPException(status_code=400, detail="material_id_and_positive_amount_required")
+
+    snap = await universe.snapshot_async()
+    st = next((x for x in snap.get("stations", []) if int(x.get("id", -1)) == int(station_id)), None)
+    if not st:
+        raise HTTPException(status_code=404, detail="station_not_found")
+    if int(st.get("owner_user_id", -1)) != int(user_id):
+        raise HTTPException(status_code=403, detail="not_station_owner")
+
+    async with universe._lock:
+        s = universe._find_station_mut(station_id)
+        inv = s.get("inventory")
+        if not isinstance(inv, dict):
+            inv = {}
+            s["inventory"] = inv
+        inv[material_id] = float(inv.get(material_id, 0.0)) + float(amount)
+        universe.save()
+
+    return {"ok": True}
+

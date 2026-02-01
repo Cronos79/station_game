@@ -195,6 +195,79 @@ class Universe:
             mods.append(module_id)
             self.save()
 
+    async def queue_build_module(self, station_id: int, module_id: str) -> int:
+        """
+        Queue a module build:
+        - one build at a time per station
+        - validate module exists
+        - validate not already installed
+        - validate budgets AFTER completion
+        - validate inventory has cost and spend immediately
+        - schedule build_module_complete event at sim_time + build_time
+
+        Returns event_id.
+        """
+        module_id = str(module_id).strip()
+        if not module_id:
+            raise ValueError("module_id_required")
+
+        m = get_module(module_id)
+        if not m:
+            raise ValueError(f"module_not_found: {module_id}")
+
+        async with self._lock:
+            station = self._find_station_mut(station_id)
+
+            # Ensure required fields exist
+            if "inventory" not in station or not isinstance(station.get("inventory"), dict):
+                station["inventory"] = {}
+            if "modules" not in station or not isinstance(station.get("modules"), list):
+                station["modules"] = []
+
+            inv: Dict[str, float] = station["inventory"]
+            mods: list = station["modules"]
+
+            # One build at a time
+            if self._station_has_pending_build(station_id):
+                raise ValueError("station_busy")
+
+            # Already installed?
+            if module_id in [str(x) for x in mods]:
+                raise ValueError(f"module_already_installed: {module_id}")
+
+            # Budget check after install (completion-time preview)
+            derived_preview = self._preview_stats_after_add(station, module_id)
+            problems = self._budget_problems(derived_preview)
+            if problems:
+                raise ValueError("over_budget: " + "; ".join(problems))
+
+            # Inventory cost check
+            cost = m.cost or {}
+            if not isinstance(cost, dict):
+                cost = {}
+
+            # Normalize inventory (optional but keeps it tidy)
+            self._clean_inventory(inv)
+
+            # Spend cost now
+            ok = self._try_spend(inv, {str(k): float(v) for k, v in cost.items()})
+            if not ok:
+                raise ValueError("insufficient_materials")
+
+            # Schedule completion
+            now_sim = float(self.state.get("sim_time", 0.0))
+            finish = now_sim + float(m.build_time)
+
+            eid = self.enqueue_event(
+                finish,
+                "build_module_complete",
+                {"station_id": int(station_id), "module_id": module_id},
+            )
+
+            self.save()
+            return eid
+
+
     async def remove_module_from_station(self, station_id: int, module_id: str) -> None:
         module_id = str(module_id).strip()
         async with self._lock:
@@ -355,6 +428,22 @@ class Universe:
 
             return st.id
 
+    def _station_has_pending_build(self, station_id: int) -> bool:
+        """
+        One-build-at-a-time rule:
+        Returns True if there is any pending build_module_complete event for this station.
+        """
+        ev = self._get_events_mut()
+        for e in ev:
+            if str(e.get("type", "")) != "build_module_complete":
+                continue
+            data = e.get("data") or {}
+            if not isinstance(data, dict):
+                continue
+            if int(data.get("station_id", -1)) == int(station_id):
+                return True
+        return False
+
 
     # ----------------------------
     # DB persistence
@@ -385,6 +474,115 @@ class Universe:
         self.last_update_real = now
 
     # ----------------------------
+    # Events (v1)
+    # ----------------------------
+
+    def _get_events_mut(self) -> list[Dict[str, Any]]:
+        """
+        Return the actual mutable events list in self.state, ensuring it exists.
+        """
+        ev = self.state.get("events")
+        if not isinstance(ev, list):
+            ev = []
+            self.state["events"] = ev
+        return ev
+
+    def _next_event_id(self) -> int:
+        """
+        Simple monotonically increasing event id.
+        We scan existing events to find max. (Fine for v1 scale.)
+        """
+        ev = self._get_events_mut()
+        if not ev:
+            return 1
+        best = 0
+        for e in ev:
+            try:
+                best = max(best, int(e.get("id", 0)))
+            except Exception:
+                pass
+        return best + 1
+
+    def enqueue_event(self, when_sim: float, type_: str, data: Dict[str, Any]) -> int:
+        """
+        Add an event to the universe at sim time 'when_sim'.
+        Returns the event id.
+        """
+        eid = self._next_event_id()
+        e = {
+            "id": eid,
+            "time": float(when_sim),
+            "type": str(type_),
+            "data": dict(data or {}),
+        }
+        self._get_events_mut().append(e)
+        # Keep events ordered by time for cheap processing
+        self._get_events_mut().sort(key=lambda x: float(x.get("time", 0.0)))
+        return eid
+
+    def _process_one_event(self, e: Dict[str, Any]) -> None:
+        et = str(e.get("type", ""))
+        data = e.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+
+        # Both event types ultimately install a module
+        if et in ("install_module", "build_module_complete"):
+            station_id = int(data.get("station_id", -1))
+            module_id = str(data.get("module_id", "")).strip()
+            if station_id <= 0 or not module_id:
+                return
+
+            station = self._find_station_mut(station_id)
+
+            mods = station.get("modules")
+            if not isinstance(mods, list):
+                mods = []
+                station["modules"] = mods
+
+            if module_id in mods:
+                return
+
+            if not get_module(module_id):
+                return
+
+            preview = self._preview_stats_after_add(station, module_id)
+            problems = self._budget_problems(preview)
+            if problems:
+                return
+
+            mods.append(module_id)
+            return
+
+        return
+
+
+    def _process_due_events(self) -> int:
+        """
+        Process all events with time <= current sim_time.
+        Returns how many events were processed.
+        """
+        sim_time = float(self.state.get("sim_time", 0.0))
+        ev = self._get_events_mut()
+        if not ev:
+            return 0
+
+        # Because we keep events sorted by time, we can pop from front
+        processed: list[Dict[str, Any]] = []
+        while ev and float(ev[0].get("time", 0.0)) <= sim_time + 1e-9:
+            processed.append(ev.pop(0))
+
+        for e in processed:
+            try:
+                self._process_one_event(e)
+            except Exception:
+                # For v1: swallow errors to avoid killing the sim loop
+                # Later: log failures
+                pass
+
+        return len(processed)
+
+    # ----------------------------
     # Simulation
     # ----------------------------
 
@@ -396,8 +594,10 @@ class Universe:
         # Passive income: station fees/taxes (tiny, just to prove economy)
         for s in self.state.get("stations", []):
             if s.get("owner_user_id") is not None:
-                s["credits"] = float(s.get("credits", 0.0)) + 0.1 * dt  # 0.1 credits/sec
-        # Later: update resources, process events, etc.
+                s["credits"] = float(s.get("credits", 0.0)) + 0.1 * float(dt)  # 0.1 credits/sec
+        # Process any events that are now due
+        self._process_due_events()
+
 
     def snapshot(self) -> Dict[str, Any]:
         """Safe snapshot for API responses."""
