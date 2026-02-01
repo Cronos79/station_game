@@ -185,6 +185,23 @@ async def api_ensure_player_station(request: Request):
 
     return {"ok": True, "station_id": station_id}
 
+@app.get("/api/my/stations")
+async def api_my_stations(request: Request):
+    user_id = get_user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="not_logged_in")
+
+    snap = await universe.snapshot_async()
+    mine = [
+        s for s in snap.get("stations", [])
+        if int(s.get("owner_user_id") or -1) == int(user_id)
+    ]
+
+    for s in mine:
+        s["derived"] = universe.compute_station_stats(s)
+
+    return {"ok": True, "stations": mine}
+
 @app.get("/api/materials")
 def api_materials():
     return {
@@ -261,36 +278,3 @@ async def api_debug_remove_module(station_id: int, payload: dict = Body(...), re
         raise HTTPException(status_code=404, detail=str(e))
 
     return {"ok": True}
-
-@app.get("/api/my/stations")
-async def api_my_stations(request: Request):
-    user_id = get_user_id_from_request(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="not_logged_in")
-
-    snap = await universe.snapshot_async()
-    mine = [s for s in snap.get("stations", []) if int(s.get("owner_user_id") or -1) == int(user_id)]
-
-    # attach derived stats (optional, but convenient)
-    for s in mine:
-        s["derived"] = universe.compute_station_stats(s)
-
-    return {"ok": True, "stations": mine}
-
-@app.get("/api/my/stations")
-async def api_my_stations(request: Request):
-    user_id = get_user_id_from_request(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="not_logged_in")
-
-    snap = await universe.snapshot_async()
-    mine = [
-        s for s in snap.get("stations", [])
-        if int(s.get("owner_user_id") or -1) == int(user_id)
-    ]
-
-    # attach derived stats so UI stays the same
-    for s in mine:
-        s["derived"] = universe.compute_station_stats(s)
-
-    return {"ok": True, "stations": mine}
