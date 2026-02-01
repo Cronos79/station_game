@@ -1,8 +1,10 @@
 # server/app.py
+from __future__ import annotations
+
 import secrets
 import time
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -29,7 +31,7 @@ universe = Universe(UniverseConfig(tick_dt=1.0, autosave_dt=20.0, catchup_max=30
 # ----------------------------
 
 @app.on_event("startup")
-async def on_startup():
+async def on_startup() -> None:
     init_db()
     universe.load()
     await universe.ensure_bootstrap_world()
@@ -38,7 +40,7 @@ async def on_startup():
 
 
 @app.on_event("shutdown")
-async def on_shutdown():
+async def on_shutdown() -> None:
     await universe.stop()
     print("🛑 Server shutting down cleanly")
 
@@ -88,11 +90,19 @@ def http_from_valueerror(msg: str) -> HTTPException:
         return HTTPException(status_code=409, detail=msg)
 
     # Validation errors
-    if msg in ("module_id_required", "station_id_required", "dt_must_be_non_negative", "delay_must_be_non_negative"):
+    if msg in (
+        "module_id_required",
+        "station_id_required",
+        "dt_must_be_non_negative",
+        "delay_must_be_non_negative",
+    ):
         return HTTPException(status_code=400, detail=msg)
 
     # Game rule failures / normal validation
-    if msg.startswith("over_budget") or msg in ("insufficient_materials", "module_already_installed", "module_not_installed"):
+    if (
+        msg.startswith("over_budget")
+        or msg in ("insufficient_materials", "module_already_installed", "module_not_installed")
+    ):
         return HTTPException(status_code=400, detail=msg)
 
     # Fallback
@@ -120,12 +130,12 @@ async def require_station_owned(request: Request, station_id: int) -> Dict[str, 
 # ----------------------------
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page():
+def login_page() -> str:
     return (WEB_DIR / "login.html").read_text(encoding="utf-8")
 
 
 @app.get("/register", response_class=HTMLResponse)
-def register_page():
+def register_page() -> str:
     return (WEB_DIR / "register.html").read_text(encoding="utf-8")
 
 
@@ -228,7 +238,6 @@ def api_me(request: Request):
 @app.get("/api/universe")
 async def api_universe():
     snap = await universe.snapshot_async()
-    # Attach derived station stats (server-side view)
     for s in snap.get("stations", []):
         s["derived"] = universe.compute_station_stats(s)
     return {"ok": True, "universe": snap}
@@ -307,7 +316,10 @@ def api_modules():
 
 @app.post("/api/stations/{station_id}/build/module")
 async def api_build_module(station_id: int, payload: dict = Body(...), request: Request = None):
-    request = request or Request  # defensive; FastAPI will supply it
+    # FastAPI will pass Request; keep signature compatible with your current style
+    if request is None:
+        raise HTTPException(status_code=500, detail="request_missing")
+
     await require_station_owned(request, station_id)
 
     module_id = str(payload.get("module_id") or "").strip()
@@ -316,7 +328,7 @@ async def api_build_module(station_id: int, payload: dict = Body(...), request: 
 
     try:
         result = await universe.queue_build_module(int(station_id), module_id)
-        # result is { event_id, finishes_at } (from cleaned Universe)
+        # result should be: {"event_id": ..., "finishes_at": ...} (Option A)
         return {"ok": True, **result}
     except ValueError as e:
         raise http_from_valueerror(str(e))
@@ -328,7 +340,9 @@ async def api_build_module(station_id: int, payload: dict = Body(...), request: 
 
 @app.post("/api/debug/stations/{station_id}/modules/add")
 async def api_debug_add_module(station_id: int, payload: dict = Body(...), request: Request = None):
-    request = request or Request
+    if request is None:
+        raise HTTPException(status_code=500, detail="request_missing")
+
     await require_station_owned(request, station_id)
 
     module_id = str(payload.get("module_id") or "").strip()
@@ -344,7 +358,9 @@ async def api_debug_add_module(station_id: int, payload: dict = Body(...), reque
 
 @app.post("/api/debug/stations/{station_id}/modules/remove")
 async def api_debug_remove_module(station_id: int, payload: dict = Body(...), request: Request = None):
-    request = request or Request
+    if request is None:
+        raise HTTPException(status_code=500, detail="request_missing")
+
     await require_station_owned(request, station_id)
 
     module_id = str(payload.get("module_id") or "").strip()
@@ -360,7 +376,9 @@ async def api_debug_remove_module(station_id: int, payload: dict = Body(...), re
 
 @app.post("/api/debug/events/install_module")
 async def api_debug_event_install_module(payload: dict = Body(...), request: Request = None):
-    request = request or Request
+    if request is None:
+        raise HTTPException(status_code=500, detail="request_missing")
+
     user_id = require_user_id(request)
 
     station_id = int(payload.get("station_id") or 0)
@@ -399,7 +417,9 @@ async def api_debug_event_install_module(payload: dict = Body(...), request: Req
 
 @app.post("/api/debug/stations/{station_id}/grant")
 async def api_debug_grant(station_id: int, payload: dict = Body(...), request: Request = None):
-    request = request or Request
+    if request is None:
+        raise HTTPException(status_code=500, detail="request_missing")
+
     await require_station_owned(request, station_id)
 
     material_id = str(payload.get("material_id") or "").strip()
