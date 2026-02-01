@@ -11,6 +11,9 @@ const state = {
     selectedStationId: null,
 };
 
+// ---------- Build polling ----------
+let buildPollTimer = null;
+
 // ---------- Helpers ----------
 function setActiveTab(page) {
     document.querySelectorAll(".tab").forEach(t => {
@@ -19,7 +22,7 @@ function setActiveTab(page) {
 }
 
 function fmt(n) {
-    if (typeof n !== "number") return String(n);
+    if (typeof n !== "number" || Number.isNaN(n)) return String(n);
     return n.toFixed(2);
 }
 
@@ -58,9 +61,13 @@ function getSelectedStation() {
     return sts.find(s => s.id === state.selectedStationId) || sts[0];
 }
 
+function getSimTime() {
+    const u = state.universe?.universe;
+    const t = u?.sim_time;
+    return (typeof t === "number" && !Number.isNaN(t)) ? t : 0;
+}
+
 function computeDerivedFromStation(st) {
-    // Uses station.derived if server already provided it.
-    // If missing (shouldn't be), returns a safe default.
     const d = st?.derived;
     if (!d) {
         return {
@@ -72,22 +79,16 @@ function computeDerivedFromStation(st) {
 }
 
 function previewInstall(st, moduleDef) {
-    // Returns a "preview" of caps/usage AFTER adding moduleDef,
-    // without changing anything.
     const d = computeDerivedFromStation(st);
 
-    // Clone caps + usage so we can modify them
     const caps = JSON.parse(JSON.stringify(d.caps || {}));
     const usage = JSON.parse(JSON.stringify(d.usage || {}));
 
-    // Effects add to caps
     const effects = moduleDef.effects || {};
     for (const [k, v] of Object.entries(effects)) {
         caps[k] = (Number(caps[k] || 0) + Number(v));
     }
 
-    // Usage changes
-    // power_used is increased by negative power_delta (consumption)
     const pd = Number(moduleDef.power_delta || 0);
     if (pd < 0) usage.power_used = Number(usage.power_used || 0) + (-pd);
 
@@ -98,7 +99,6 @@ function previewInstall(st, moduleDef) {
 }
 
 function checkBudget(preview) {
-    // Returns { ok: boolean, problems: string[] }
     const caps = preview.caps || {};
     const usage = preview.usage || {};
 
@@ -117,6 +117,75 @@ function checkBudget(preview) {
     if (powerUsed > powerCap + 1e-9) problems.push(`Power: ${fmt(powerUsed)} / ${fmt(powerCap)}`);
 
     return { ok: problems.length === 0, problems };
+}
+
+/**
+ * Find an active/pending build event for a station by scanning /api/universe events.
+ *
+ * Supports both shapes:
+ *  - Option A (recommended): { id, time, type:"build_module_complete", data:{station_id,module_id} }
+ *  - Older variant:          { id, fires_at, type:"build_module", data:{station_id,module_id} }
+ */
+function findPendingBuildForStation(stationId) {
+    const events = state.universe?.universe?.events;
+    if (!Array.isArray(events) || !stationId) return null;
+
+    const candidates = [];
+    for (const ev of events) {
+        if (!ev || typeof ev !== "object") continue;
+
+        const type = String(ev.type || "");
+        const data = ev.data && typeof ev.data === "object" ? ev.data : {};
+        const sid = Number(data.station_id ?? data.stationId ?? -1);
+
+        if (sid !== Number(stationId)) continue;
+
+        const isBuild =
+            type === "build_module_complete" || // Option A
+            type === "build_module";            // older
+
+        if (!isBuild) continue;
+
+        const finishesAt =
+            (typeof ev.time === "number" ? ev.time : null) ??
+            (typeof ev.fires_at === "number" ? ev.fires_at : null) ??
+            (typeof ev.firesAt === "number" ? ev.firesAt : null);
+
+        if (typeof finishesAt !== "number") continue;
+
+        candidates.push({
+            event_id: Number(ev.id ?? 0),
+            type,
+            module_id: String(data.module_id ?? data.moduleId ?? ""),
+            finishes_at: finishesAt,
+        });
+    }
+
+    if (!candidates.length) return null;
+
+    // Choose the soonest finishing build (in case old data exists)
+    candidates.sort((a, b) => a.finishes_at - b.finishes_at);
+    return candidates[0];
+}
+
+function startBuildPolling() {
+    if (buildPollTimer) return;
+    buildPollTimer = setInterval(async () => {
+        // Only poll while user is on Modules page (keeps noise down)
+        if (state.page !== "modules") return;
+        try {
+            await refreshAll();
+        } catch {
+            // ignore polling errors
+        }
+    }, 2000);
+}
+
+function stopBuildPolling() {
+    if (buildPollTimer) {
+        clearInterval(buildPollTimer);
+        buildPollTimer = null;
+    }
 }
 
 // ---------- Account UI ----------
@@ -143,7 +212,6 @@ function renderAccount() {
 function render() {
     setActiveTab(state.page);
 
-    // top-right button in main header
     const ensureBtn = document.getElementById("ensureStationBtn");
     ensureBtn.style.display = (state.me && state.me.user_id) ? "inline-flex" : "none";
 
@@ -171,7 +239,7 @@ function renderNews() {
     document.getElementById("sideSub").textContent = "Patch notes & universe headlines";
 
     const items = [
-        { title: "Patch v0.1", body: "Modules + derived station stats now visible in UI." },
+        { title: "Patch v0.1", body: "Build queue now supported (one build at a time)." },
         { title: "Universe", body: "Sol belts discovered: Inner Belt, Outer Belt." },
         { title: "Rumor", body: "Trader factions will arrive later (AI placeholder)." },
     ];
@@ -182,11 +250,11 @@ function renderNews() {
     list.className = "list";
     items.forEach(it => {
         list.appendChild(el(`
-      <div class="list-item">
-        <div class="name">${it.title}</div>
-        <div class="meta">${it.body}</div>
-      </div>
-    `));
+          <div class="list-item">
+            <div class="name">${it.title}</div>
+            <div class="meta">${it.body}</div>
+          </div>
+        `));
     });
     side.appendChild(list);
 
@@ -199,15 +267,15 @@ function renderNews() {
     const moduleCount = state.modules?.modules?.length ?? 0;
 
     document.getElementById("mainBody").innerHTML = `
-    <div class="kvs">
-      <div class="kv"><div class="k">Sim Time</div><div class="v">${u ? fmt(u.sim_time) : "—"}</div></div>
-      <div class="kv"><div class="k">Stations</div><div class="v">${stationCount}</div></div>
-      <div class="kv"><div class="k">Bodies</div><div class="v">${bodyCount}</div></div>
-      <div class="kv"><div class="k">Modules Defined</div><div class="v">${moduleCount}</div></div>
-    </div>
-    <div style="height:12px"></div>
-    <div class="muted">Tip: go to <strong>Modules</strong> and install modules (debug) to test station stats.</div>
-  `;
+      <div class="kvs">
+        <div class="kv"><div class="k">Sim Time</div><div class="v">${u ? fmt(u.sim_time) : "—"}</div></div>
+        <div class="kv"><div class="k">Stations</div><div class="v">${stationCount}</div></div>
+        <div class="kv"><div class="k">Bodies</div><div class="v">${bodyCount}</div></div>
+        <div class="kv"><div class="k">Modules Defined</div><div class="v">${moduleCount}</div></div>
+      </div>
+      <div style="height:12px"></div>
+      <div class="muted">Tip: go to <strong>Modules</strong> and queue a build to test the build timer + install completion.</div>
+    `;
 }
 
 function renderUniverse() {
@@ -225,11 +293,11 @@ function renderUniverse() {
         list.className = "list";
         bodies.forEach(b => {
             list.appendChild(el(`
-        <div class="list-item">
-          <div class="name">${b.name}</div>
-          <div class="meta">${b.system} • ${b.type}</div>
-        </div>
-      `));
+              <div class="list-item">
+                <div class="name">${b.name}</div>
+                <div class="meta">${b.system} • ${b.type}</div>
+              </div>
+            `));
         });
         side.appendChild(list);
     }
@@ -249,10 +317,10 @@ function renderStations() {
 
     if (!stations.length) {
         side.innerHTML = `
-      <div class="muted">No stations yet.</div>
-      <div style="height:10px"></div>
-      <div class="muted">Use “Ensure Player Station” to create your first station.</div>
-    `;
+          <div class="muted">No stations yet.</div>
+          <div style="height:10px"></div>
+          <div class="muted">Use “Ensure Player Station” to create your first station.</div>
+        `;
         document.getElementById("mainTitle").textContent = "Stations";
         document.getElementById("mainSub").textContent = "You don’t own any stations yet.";
         document.getElementById("mainBody").innerHTML = `<div class="muted">Create a station to begin.</div>`;
@@ -266,11 +334,11 @@ function renderStations() {
     stations.forEach(s => {
         const active = (s.id === state.selectedStationId);
         const li = el(`
-      <div class="list-item ${active ? "active" : ""}">
-        <div class="name">${s.name}</div>
-        <div class="meta">System: ${s.system} • Modules: ${(s.modules || []).length}</div>
-      </div>
-    `);
+          <div class="list-item ${active ? "active" : ""}">
+            <div class="name">${s.name}</div>
+            <div class="meta">System: ${s.system} • Modules: ${(s.modules || []).length}</div>
+          </div>
+        `);
         li.onclick = () => { state.selectedStationId = s.id; renderStations(); };
         list.appendChild(li);
     });
@@ -285,66 +353,74 @@ function renderStations() {
     document.getElementById("mainSub").textContent = `System: ${st.system} • Credits: ${fmt(st.credits)}`;
 
     document.getElementById("mainBody").innerHTML = `
-    <div class="kvs">
-      <div class="kv"><div class="k">Power</div><div class="v">${fmt(usage.power_used)} / ${fmt(caps.power_cap)}</div></div>
-      <div class="kv"><div class="k">Crew</div><div class="v">${fmt(usage.crew_used)} / ${fmt(caps.crew_cap)}</div></div>
-      <div class="kv"><div class="k">Slots</div><div class="v">${fmt(usage.slots_used)} / ${fmt(caps.slot_cap)}</div></div>
-      <div class="kv"><div class="k">Cargo Cap</div><div class="v">${fmt(caps.cargo_cap)}</div></div>
-      <div class="kv"><div class="k">Dock Cap</div><div class="v">${fmt(caps.dock_cap)}</div></div>
-      <div class="kv"><div class="k">Defense</div><div class="v">${fmt(caps.defense)}</div></div>
-      <div class="kv"><div class="k">Scan Level</div><div class="v">${fmt(caps.scan_level)}</div></div>
-    </div>
+      <div class="kvs">
+        <div class="kv"><div class="k">Power</div><div class="v">${fmt(usage.power_used)} / ${fmt(caps.power_cap)}</div></div>
+        <div class="kv"><div class="k">Crew</div><div class="v">${fmt(usage.crew_used)} / ${fmt(caps.crew_cap)}</div></div>
+        <div class="kv"><div class="k">Slots</div><div class="v">${fmt(usage.slots_used)} / ${fmt(caps.slot_cap)}</div></div>
+        <div class="kv"><div class="k">Cargo Cap</div><div class="v">${fmt(caps.cargo_cap)}</div></div>
+        <div class="kv"><div class="k">Dock Cap</div><div class="v">${fmt(caps.dock_cap)}</div></div>
+        <div class="kv"><div class="k">Defense</div><div class="v">${fmt(caps.defense)}</div></div>
+        <div class="kv"><div class="k">Scan Level</div><div class="v">${fmt(caps.scan_level)}</div></div>
+      </div>
 
-    <div style="height:12px"></div>
-    <div class="row">
-      <span class="pill">Installed Modules: <strong style="color:var(--text)">${(st.modules || []).length}</strong></span>
-    </div>
+      <div style="height:12px"></div>
+      <div class="row">
+        <span class="pill">Installed Modules: <strong style="color:var(--text)">${(st.modules || []).length}</strong></span>
+      </div>
 
-    <div style="height:10px"></div>
-    <pre>${JSON.stringify(st.modules || [], null, 2)}</pre>
-  `;
+      <div style="height:10px"></div>
+      <pre>${JSON.stringify(st.modules || [], null, 2)}</pre>
+    `;
 }
 
 function renderModules() {
     document.getElementById("sideTitle").textContent = "Modules";
-    document.getElementById("sideSub").textContent = "Browse module definitions (data-only)";
+    document.getElementById("sideSub").textContent = "Build modules (queue-based)";
 
     const stations = getStations();
     const st = getSelectedStation();
 
-    // Side panel: pick a station (so installs know where to go)
+    // Side panel: pick a station
     const side = document.getElementById("sideBody");
     side.innerHTML = "";
 
     if (!stations.length) {
         side.innerHTML = `
-      <div class="muted">No stations available.</div>
-      <div style="height:10px"></div>
-      <div class="muted">Create a station first using “Ensure Player Station”.</div>
-    `;
+          <div class="muted">No stations available.</div>
+          <div style="height:10px"></div>
+          <div class="muted">Create a station first using “Ensure Player Station”.</div>
+        `;
     } else {
         const list = document.createElement("div");
         list.className = "list";
         stations.forEach(s => {
             const active = (s.id === state.selectedStationId);
             const li = el(`
-        <div class="list-item ${active ? "active" : ""}">
-          <div class="name">${s.name}</div>
-          <div class="meta">Modules: ${(s.modules || []).length}</div>
-        </div>
-      `);
+              <div class="list-item ${active ? "active" : ""}">
+                <div class="name">${s.name}</div>
+                <div class="meta">Modules: ${(s.modules || []).length}</div>
+              </div>
+            `);
             li.onclick = () => { state.selectedStationId = s.id; renderModules(); };
             list.appendChild(li);
         });
         side.appendChild(list);
     }
 
-    // Main panel: module table
+    // Main panel
     document.getElementById("mainTitle").textContent = "Module Browser";
     document.getElementById("mainSub").textContent = st
         ? `Selected Station: ${st.name}`
-        : "Create/select a station to install modules (debug)";
+        : "Create/select a station to queue builds";
 
+    const mods = state.modules?.modules ?? [];
+    if (!mods.length) {
+        document.getElementById("mainBody").innerHTML = `<div class="muted">No module definitions loaded.</div>`;
+        stopBuildPolling();
+        return;
+    }
+
+    // Budget pills
     let budgetHtml = `<div class="muted" style="margin-bottom:10px;">Select a station to see budgets.</div>`;
     if (st && st.derived) {
         const caps = st.derived.caps;
@@ -355,27 +431,55 @@ function renderModules() {
         const slotsOk = usage.slots_used <= caps.slot_cap + 1e-9;
 
         budgetHtml = `
-    <div class="row" style="margin-bottom:10px;">
-      <span class="pill">Power: <strong style="color:${powerOk ? "var(--text)" : "var(--danger)"}">${fmt(usage.power_used)} / ${fmt(caps.power_cap)}</strong></span>
-      <span class="pill">Crew: <strong style="color:${crewOk ? "var(--text)" : "var(--danger)"}">${fmt(usage.crew_used)} / ${fmt(caps.crew_cap)}</strong></span>
-      <span class="pill">Slots: <strong style="color:${slotsOk ? "var(--text)" : "var(--danger)"}">${fmt(usage.slots_used)} / ${fmt(caps.slot_cap)}</strong></span>
-    </div>
-  `;
+          <div class="row" style="margin-bottom:10px;">
+            <span class="pill">Power: <strong style="color:${powerOk ? "var(--text)" : "var(--danger)"}">${fmt(usage.power_used)} / ${fmt(caps.power_cap)}</strong></span>
+            <span class="pill">Crew: <strong style="color:${crewOk ? "var(--text)" : "var(--danger)"}">${fmt(usage.crew_used)} / ${fmt(caps.crew_cap)}</strong></span>
+            <span class="pill">Slots: <strong style="color:${slotsOk ? "var(--text)" : "var(--danger)"}">${fmt(usage.slots_used)} / ${fmt(caps.slot_cap)}</strong></span>
+          </div>
+        `;
     }
 
+    // Pending build banner
+    const simTime = getSimTime();
+    const pending = st ? findPendingBuildForStation(st.id) : null;
+    const busy = !!pending;
 
-    const mods = state.modules?.modules ?? [];
+    let buildBanner = "";
+    if (st && pending) {
+        const remaining = Math.max(0, pending.finishes_at - simTime);
+        const mm = Math.floor(remaining / 60);
+        const ss = Math.floor(remaining % 60);
+        const remText = `${mm}:${String(ss).padStart(2, "0")}`;
 
-    if (!mods.length) {
-        document.getElementById("mainBody").innerHTML = `<div class="muted">No module definitions loaded.</div>`;
-        return;
+        // Find module display name
+        const def = mods.find(x => x.id === pending.module_id);
+        const modName = def ? def.name : pending.module_id;
+
+        buildBanner = `
+          <div class="row" style="margin-bottom:10px;">
+            <span class="pill">
+              🏗️ Build in progress:
+              <strong style="color:var(--text)">${modName}</strong>
+              <span class="muted">• completes in</span>
+              <strong style="color:var(--text)">${remText}</strong>
+            </span>
+            <span class="pill muted">event_id: ${pending.event_id}</span>
+          </div>
+          <div class="muted" style="margin-bottom:10px;">
+            One build at a time. Build buttons are disabled until the current build completes.
+          </div>
+        `;
     }
 
-    // Build a fast lookup of installed modules for the selected station
+    if (busy && state.page === "modules") startBuildPolling();
+    if (!busy) stopBuildPolling();
+
+    // Installed lookup
     const installed = new Set((st?.modules ?? []).map(String));
 
     const rows = mods.map(m => {
         const isInstalled = installed.has(m.id);
+
         const costEntries = Object.entries(m.cost || {});
         const costText = costEntries.length
             ? costEntries.map(([k, v]) => `${k} x${v}`).join(", ")
@@ -390,47 +494,50 @@ function renderModules() {
             ? `<span class="muted">—</span>`
             : isInstalled
                 ? `<button class="btn btn-danger" data-action="remove" data-mid="${m.id}">Remove</button>`
-                : `<button class="btn btn-primary" data-action="add" data-mid="${m.id}">Install (debug)</button>`;
+                : `<button class="btn btn-primary" data-action="build" data-mid="${m.id}" ${busy ? "disabled" : ""}>Build</button>`;
 
         return `
-      <tr>
-        <td><strong>${m.name}</strong><div class="muted" style="font-size:12px;">${m.id}</div></td>
-        <td><span class="pill">${m.category}</span></td>
-        <td>${m.power_delta >= 0 ? `+${m.power_delta}` : `${m.power_delta}`}</td>
-        <td>${m.crew_required}</td>
-        <td>${m.slot_cost}</td>
-        <td>${m.build_time}s</td>
-        <td class="muted">${costText}</td>
-        <td class="muted">${effectsText}</td>
-        <td>${actionBtn}</td>
-      </tr>
-    `;
+          <tr>
+            <td><strong>${m.name}</strong><div class="muted" style="font-size:12px;">${m.id}</div></td>
+            <td><span class="pill">${m.category}</span></td>
+            <td>${m.power_delta >= 0 ? `+${m.power_delta}` : `${m.power_delta}`}</td>
+            <td>${m.crew_required}</td>
+            <td>${m.slot_cost}</td>
+            <td>${m.build_time}s</td>
+            <td class="muted">${costText}</td>
+            <td class="muted">${effectsText}</td>
+            <td>${actionBtn}</td>
+          </tr>
+        `;
     }).join("");
 
     document.getElementById("mainBody").innerHTML = `
-    ${budgetHtml}
-    <div class="muted" style="margin-bottom:10px;">
-      This page is for testing. “Install (debug)” directly adds the module to your station (no build queue yet).
-    </div>
-    <table class="table" id="modulesTable">
-      <thead>
-        <tr>
-          <th>Module</th>
-          <th>Category</th>
-          <th>Power Δ</th>
-          <th>Crew</th>
-          <th>Slots</th>
-          <th>Build</th>
-          <th>Cost</th>
-          <th>Effects</th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
+      ${budgetHtml}
+      ${buildBanner}
+      <div class="muted" style="margin-bottom:10px;">
+        Queue builds using <strong>Build</strong>. When the timer finishes, the module installs automatically (server-side).
+        <br/>
+        <span class="muted">Remove is still “debug” for now.</span>
+      </div>
+      <table class="table" id="modulesTable">
+        <thead>
+          <tr>
+            <th>Module</th>
+            <th>Category</th>
+            <th>Power Δ</th>
+            <th>Crew</th>
+            <th>Slots</th>
+            <th>Build</th>
+            <th>Cost</th>
+            <th>Effects</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
 
-    // Wire up button clicks (event delegation)
+    // Click handling
     const table = document.getElementById("modulesTable");
     table.onclick = async (ev) => {
         const btn = ev.target.closest("button[data-action]");
@@ -441,35 +548,56 @@ function renderModules() {
         const mid = btn.dataset.mid;
 
         try {
-            if (action === "add") {
-                // Find module definition for mid
+            if (action === "build") {
+                if (busy) {
+                    alert("Build already in progress for this station.");
+                    return;
+                }
+
                 const moduleDef = (mods || []).find(x => x.id === mid);
                 if (!moduleDef) {
                     alert("Unknown module: " + mid);
                     return;
                 }
 
-                // Preview install
+                // Local preview check (server will enforce too)
                 const preview = previewInstall(st, moduleDef);
                 const check = checkBudget(preview);
-
                 if (!check.ok) {
                     alert(
-                        "Cannot install module (over budget):\n\n" +
+                        "Cannot build module (over budget after install):\n\n" +
                         check.problems.map(p => "• " + p).join("\n")
                     );
                     return;
                 }
 
-                await apiPost(`/api/debug/stations/${st.id}/modules/add`, { module_id: mid });
-            } else {
+                await apiPost(`/api/stations/${st.id}/build/module`, { module_id: mid });
+            }
+            else if (action === "remove") {
                 await apiPost(`/api/debug/stations/${st.id}/modules/remove`, { module_id: mid });
             }
+
             await refreshAll();
             state.page = "modules";
             render();
         } catch (e) {
-            alert("Module action failed: " + e.message);
+            // Map common server errors to nicer messages
+            const msg = (e && e.message) ? e.message : String(e);
+
+            if (msg === "station_busy" || msg === "build_in_progress") {
+                alert("That station is already building something (one build at a time).");
+                return;
+            }
+            if (msg.startsWith("over_budget")) {
+                alert("Cannot build: would exceed station limits.\n\n" + msg);
+                return;
+            }
+            if (msg === "insufficient_materials") {
+                alert("Not enough materials to pay the module cost.");
+                return;
+            }
+
+            alert("Action failed: " + msg);
         }
     };
 }
@@ -493,7 +621,7 @@ async function refreshAll() {
     state.myStations = [];
 
     if (state.me && state.me.user_id) {
-        // Optional but recommended: auto-ensure station on load
+        // Optional: auto-ensure station on load
         try { await apiPost("/api/universe/ensure_player_station", {}); }
         catch { /* ignore */ }
 
@@ -515,6 +643,9 @@ async function refreshAll() {
         if (!exists) state.selectedStationId = stations[0].id;
     }
 
+    // If we are NOT on modules page, stop polling (keeps things quiet)
+    if (state.page !== "modules") stopBuildPolling();
+
     render();
 }
 
@@ -523,6 +654,10 @@ document.getElementById("tabs").onclick = (ev) => {
     const t = ev.target.closest(".tab");
     if (!t) return;
     state.page = t.dataset.page;
+
+    // Stop polling when leaving modules
+    if (state.page !== "modules") stopBuildPolling();
+
     render();
 };
 

@@ -8,17 +8,17 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from server.game.db import get_conn
-
 from server.sim.entities import Station
 from server.sim.materials import is_valid_material
-
 from server.sim.modules import get_module
+
 
 @dataclass
 class UniverseConfig:
     tick_dt: float = 1.0        # sim seconds per tick
     autosave_dt: float = 20.0   # save every N sim seconds
     catchup_max: float = 300.0  # max offline seconds to simulate
+
 
 class Universe:
     """
@@ -58,6 +58,10 @@ class Universe:
 
         # Simple lock so tick/save and API reads don't fight
         self._lock = asyncio.Lock()
+
+    # ----------------------------
+    # Station derived stats + budgets
+    # ----------------------------
 
     def compute_station_stats(self, station: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -102,37 +106,24 @@ class Universe:
             },
             "modules": [str(x) for x in module_ids],
         }
-    
+
     def _find_station_mut(self, station_id: int) -> Dict[str, Any]:
-        """
-        Find the *actual* station dict inside self.state (mutable reference).
-        Raises ValueError if not found.
-        """
+        """Find the *actual* station dict inside self.state (mutable reference)."""
         for s in self.state.get("stations", []):
             if int(s.get("id", -1)) == int(station_id):
                 return s
         raise ValueError(f"station_not_found: {station_id}")
 
-
     def _preview_stats_after_add(self, station: Dict[str, Any], module_id: str) -> Dict[str, Any]:
-        """
-        Return derived stats *as if* module_id were added to station.modules.
-        Does not mutate the station.
-        """
-        # Copy the station shallowly, and copy the modules list (so we don't mutate original)
+        """Return derived stats *as if* module_id were added to station.modules. Does not mutate."""
         temp = dict(station)
         modules = list(temp.get("modules") or [])
         modules.append(module_id)
         temp["modules"] = modules
-
         return self.compute_station_stats(temp)
 
-
     def _budget_problems(self, derived: Dict[str, Any]) -> list[str]:
-        """
-        Return a list of human-readable budget problems.
-        Empty list means OK.
-        """
+        """Return a list of human-readable budget problems. Empty list means OK."""
         caps = derived.get("caps", {}) or {}
         usage = derived.get("usage", {}) or {}
 
@@ -161,28 +152,51 @@ class Universe:
 
         return problems
 
+    def _install_module_nolock(self, station_id: int, module_id: str) -> None:
+        """
+        Install module into station (NO LOCK).
+        Idempotent. Re-checks budgets for safety.
+        """
+        module_id = str(module_id).strip()
+        if not module_id:
+            return
+
+        if not get_module(module_id):
+            return
+
+        station = self._find_station_mut(station_id)
+
+        mods = station.get("modules")
+        if not isinstance(mods, list):
+            mods = []
+            station["modules"] = mods
+
+        if module_id in mods:
+            return
+
+        preview = self._preview_stats_after_add(station, module_id)
+        problems = self._budget_problems(preview)
+        if problems:
+            return
+
+        mods.append(module_id)
+
     async def add_module_to_station(self, station_id: int, module_id: str) -> None:
         """
-        Server-authoritative install:
-        - station must exist
-        - module_id must exist
-        - must not already be installed
-        - must not exceed budgets after install
+        Debug/instant install (still validated server-side).
         """
         module_id = str(module_id).strip()
         if not module_id:
             raise ValueError("module_id_required")
-
         if not get_module(module_id):
             raise ValueError(f"module_not_found: {module_id}")
 
         async with self._lock:
             station = self._find_station_mut(station_id)
-
             mods = station.get("modules")
             if not isinstance(mods, list):
-                mods = []
-                station["modules"] = mods
+                station["modules"] = []
+                mods = station["modules"]
 
             if module_id in mods:
                 raise ValueError(f"module_already_installed: {module_id}")
@@ -192,81 +206,8 @@ class Universe:
             if problems:
                 raise ValueError("over_budget: " + "; ".join(problems))
 
-            mods.append(module_id)
+            self._install_module_nolock(station_id, module_id)
             self.save()
-
-    async def queue_build_module(self, station_id: int, module_id: str) -> int:
-        """
-        Queue a module build:
-        - one build at a time per station
-        - validate module exists
-        - validate not already installed
-        - validate budgets AFTER completion
-        - validate inventory has cost and spend immediately
-        - schedule build_module_complete event at sim_time + build_time
-
-        Returns event_id.
-        """
-        module_id = str(module_id).strip()
-        if not module_id:
-            raise ValueError("module_id_required")
-
-        m = get_module(module_id)
-        if not m:
-            raise ValueError(f"module_not_found: {module_id}")
-
-        async with self._lock:
-            station = self._find_station_mut(station_id)
-
-            # Ensure required fields exist
-            if "inventory" not in station or not isinstance(station.get("inventory"), dict):
-                station["inventory"] = {}
-            if "modules" not in station or not isinstance(station.get("modules"), list):
-                station["modules"] = []
-
-            inv: Dict[str, float] = station["inventory"]
-            mods: list = station["modules"]
-
-            # One build at a time
-            if self._station_has_pending_build(station_id):
-                raise ValueError("station_busy")
-
-            # Already installed?
-            if module_id in [str(x) for x in mods]:
-                raise ValueError(f"module_already_installed: {module_id}")
-
-            # Budget check after install (completion-time preview)
-            derived_preview = self._preview_stats_after_add(station, module_id)
-            problems = self._budget_problems(derived_preview)
-            if problems:
-                raise ValueError("over_budget: " + "; ".join(problems))
-
-            # Inventory cost check
-            cost = m.cost or {}
-            if not isinstance(cost, dict):
-                cost = {}
-
-            # Normalize inventory (optional but keeps it tidy)
-            self._clean_inventory(inv)
-
-            # Spend cost now
-            ok = self._try_spend(inv, {str(k): float(v) for k, v in cost.items()})
-            if not ok:
-                raise ValueError("insufficient_materials")
-
-            # Schedule completion
-            now_sim = float(self.state.get("sim_time", 0.0))
-            finish = now_sim + float(m.build_time)
-
-            eid = self.enqueue_event(
-                finish,
-                "build_module_complete",
-                {"station_id": int(station_id), "module_id": module_id},
-            )
-
-            self.save()
-            return eid
-
 
     async def remove_module_from_station(self, station_id: int, module_id: str) -> None:
         module_id = str(module_id).strip()
@@ -282,27 +223,21 @@ class Universe:
                 raise ValueError(f"module_not_installed: {module_id}")
 
             mods.remove(module_id)
-            self.save()    
+            self.save()
 
     # ----------------------------
     # Econ
     # ----------------------------
 
     def _try_spend(self, inventory: Dict[str, float], cost: Dict[str, float]) -> bool:
-        """
-        Return True and subtract items if inventory covers cost.
-        Return False and do nothing if insufficient.
-        """
-        # Check first
+        """Return True and subtract items if inventory covers cost; else False."""
         for item, amount in cost.items():
             have = float(inventory.get(item, 0.0))
             if have < float(amount):
                 return False
 
-        # Spend
         for item, amount in cost.items():
             inventory[item] = float(inventory.get(item, 0.0)) - float(amount)
-            # Keep it clean: delete near-zero entries
             if inventory[item] <= 1e-9:
                 del inventory[item]
 
@@ -311,7 +246,7 @@ class Universe:
     def _clean_inventory(self, inv: Dict[str, float]) -> None:
         """
         Remove invalid materials and normalize amounts to floats.
-        Keeps your saves clean if you ever typo an id.
+        Keeps saves clean if you ever typo an id.
         """
         bad_keys = [k for k in inv.keys() if not is_valid_material(str(k))]
         for k in bad_keys:
@@ -322,21 +257,16 @@ class Universe:
             if inv[k] <= 1e-9:
                 del inv[k]
 
-
     # ----------------------------
     # bodies
     # ----------------------------
 
     async def ensure_bootstrap_world(self) -> None:
-        """
-        Ensure the universe has at least a starter system layout.
-        Safe to call multiple times.
-        """
+        """Ensure the universe has at least a starter system layout. Safe to call multiple times."""
         async with self._lock:
             if self.state.get("bodies"):
                 return
 
-            # Minimal Sol setup (data only)
             from server.sim.bodies import Body
 
             bodies = [
@@ -347,10 +277,7 @@ class Universe:
                     type="asteroid_belt",
                     x=25.0,
                     y=5.0,
-                    materials={
-                        "iron_ore": 0.7,
-                        "copper_ore": 0.2,
-                    },
+                    materials={"iron_ore": 0.7, "copper_ore": 0.2},
                 ),
                 Body(
                     id=2,
@@ -359,11 +286,7 @@ class Universe:
                     type="asteroid_belt",
                     x=-40.0,
                     y=10.0,
-                    materials={
-                        "iron_ore": 0.5,
-                        "copper_ore": 0.1,
-                        # later you add nickel_ore, titanium_ore, etc.
-                    },
+                    materials={"iron_ore": 0.5, "copper_ore": 0.1},
                 ),
             ]
 
@@ -383,7 +306,7 @@ class Universe:
                 if s.get("owner_user_id") == user_id:
                     changed = False
 
-                    if "inventory" not in s:
+                    if "inventory" not in s or not isinstance(s.get("inventory"), dict):
                         s["inventory"] = {}
                         changed = True
 
@@ -415,10 +338,7 @@ class Universe:
                 x=0.0,
                 y=0.0,
                 credits=1000.0,
-                inventory={
-                    "iron_ore": 5.0,
-                    "copper_ore": 2.0,
-                },
+                inventory={"iron_ore": 5.0, "copper_ore": 2.0},
                 modules=[],
             )
 
@@ -428,13 +348,51 @@ class Universe:
 
             return st.id
 
-    def _station_has_pending_build(self, station_id: int) -> bool:
-        """
-        One-build-at-a-time rule:
-        Returns True if there is any pending build_module_complete event for this station.
-        """
+    # ----------------------------
+    # Events (v1) - single system
+    # ----------------------------
+
+    def _get_events_mut(self) -> list[Dict[str, Any]]:
+        """Return the actual mutable events list in self.state, ensuring it exists."""
+        ev = self.state.get("events")
+        if not isinstance(ev, list):
+            ev = []
+            self.state["events"] = ev
+        return ev
+
+    def _next_event_id(self) -> int:
+        """Simple monotonically increasing event id (scan max; fine for v1)."""
         ev = self._get_events_mut()
+        if not ev:
+            return 1
+        best = 0
         for e in ev:
+            try:
+                best = max(best, int(e.get("id", 0)))
+            except Exception:
+                pass
+        return best + 1
+
+    def enqueue_event(self, when_sim: float, type_: str, data: Dict[str, Any]) -> int:
+        """
+        Add an event to the universe at sim time 'when_sim'.
+        Events are kept ordered by time.
+        """
+        eid = self._next_event_id()
+        e = {
+            "id": int(eid),
+            "time": float(when_sim),
+            "type": str(type_),
+            "data": dict(data or {}),
+        }
+        ev = self._get_events_mut()
+        ev.append(e)
+        ev.sort(key=lambda x: float(x.get("time", 0.0)))
+        return int(eid)
+
+    def _station_has_pending_build(self, station_id: int) -> bool:
+        """One-build-at-a-time rule (pending build completion event exists)."""
+        for e in self._get_events_mut():
             if str(e.get("type", "")) != "build_module_complete":
                 continue
             data = e.get("data") or {}
@@ -444,6 +402,116 @@ class Universe:
                 return True
         return False
 
+    def _process_one_event(self, e: Dict[str, Any]) -> None:
+        et = str(e.get("type", ""))
+        data = e.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+
+        # Both event types ultimately install a module
+        if et in ("build_module_complete", "install_module"):
+            station_id = int(data.get("station_id", -1))
+            module_id = str(data.get("module_id", "")).strip()
+            if station_id <= 0 or not module_id:
+                return
+
+            # install module (idempotent + budget safe)
+            self._install_module_nolock(station_id, module_id)
+            return
+
+        # Unknown event types: ignore for now
+        return
+        
+    def _process_due_events(self) -> int:
+        """
+        Process all events with time <= current sim_time.
+        Returns how many events were processed.
+        """
+        sim_time = float(self.state.get("sim_time", 0.0))
+        ev = self._get_events_mut()
+        if not ev:
+            return 0
+
+        processed: list[Dict[str, Any]] = []
+        while ev and float(ev[0].get("time", 0.0)) <= sim_time + 1e-9:
+            processed.append(ev.pop(0))
+
+        for e in processed:
+            try:
+                self._process_one_event(e)
+            except Exception:
+                # For v1: swallow errors to avoid killing the sim loop
+                pass
+
+        return len(processed)
+
+    # ----------------------------
+    # Build queue (v1)
+    # ----------------------------
+
+    async def queue_build_module(self, station_id: int, module_id: str) -> Dict[str, Any]:
+        """
+        Queue a module build:
+        - one build at a time per station
+        - validate module exists
+        - validate not already installed
+        - validate budgets AFTER completion (preview)
+        - validate inventory has cost and spend immediately
+        - schedule build_module_complete event at sim_time + build_time
+
+        Returns: { event_id, finishes_at }
+        """
+        module_id = str(module_id).strip()
+        if not module_id:
+            raise ValueError("module_id_required")
+
+        m = get_module(module_id)
+        if not m:
+            raise ValueError(f"module_not_found: {module_id}")
+
+        async with self._lock:
+            station = self._find_station_mut(station_id)
+
+            mods = station.get("modules")
+            if not isinstance(mods, list):
+                mods = []
+                station["modules"] = mods
+
+            if module_id in mods:
+                raise ValueError(f"module_already_installed: {module_id}")
+
+            if self._station_has_pending_build(station_id):
+                raise ValueError("build_in_progress")
+
+            # budget preview (after install)
+            derived_preview = self._preview_stats_after_add(station, module_id)
+            problems = self._budget_problems(derived_preview)
+            if problems:
+                raise ValueError("over_budget: " + "; ".join(problems))
+
+            inv = station.get("inventory")
+            if not isinstance(inv, dict):
+                inv = {}
+                station["inventory"] = inv
+
+            self._clean_inventory(inv)
+
+            cost = m.cost or {}
+            if cost:
+                if not self._try_spend(inv, {str(k): float(v) for k, v in cost.items()}):
+                    raise ValueError("insufficient_materials")
+
+            sim_time = float(self.state.get("sim_time", 0.0))
+            finishes_at = sim_time + float(m.build_time)
+
+            event_id = self.enqueue_event(
+                finishes_at,
+                "build_module_complete",
+                {"station_id": int(station_id), "module_id": module_id},
+            )
+
+            self.save()
+            return {"event_id": int(event_id), "finishes_at": float(finishes_at)}
 
     # ----------------------------
     # DB persistence
@@ -460,8 +528,6 @@ class Universe:
 
         self.state = json.loads(row["state_json"])
         self.last_update_real = float(row["last_update"])
-
-        # Set autosave baseline to "now"
         self._last_autosave_sim = float(self.state.get("sim_time", 0.0))
 
     def save(self) -> None:
@@ -474,115 +540,6 @@ class Universe:
         self.last_update_real = now
 
     # ----------------------------
-    # Events (v1)
-    # ----------------------------
-
-    def _get_events_mut(self) -> list[Dict[str, Any]]:
-        """
-        Return the actual mutable events list in self.state, ensuring it exists.
-        """
-        ev = self.state.get("events")
-        if not isinstance(ev, list):
-            ev = []
-            self.state["events"] = ev
-        return ev
-
-    def _next_event_id(self) -> int:
-        """
-        Simple monotonically increasing event id.
-        We scan existing events to find max. (Fine for v1 scale.)
-        """
-        ev = self._get_events_mut()
-        if not ev:
-            return 1
-        best = 0
-        for e in ev:
-            try:
-                best = max(best, int(e.get("id", 0)))
-            except Exception:
-                pass
-        return best + 1
-
-    def enqueue_event(self, when_sim: float, type_: str, data: Dict[str, Any]) -> int:
-        """
-        Add an event to the universe at sim time 'when_sim'.
-        Returns the event id.
-        """
-        eid = self._next_event_id()
-        e = {
-            "id": eid,
-            "time": float(when_sim),
-            "type": str(type_),
-            "data": dict(data or {}),
-        }
-        self._get_events_mut().append(e)
-        # Keep events ordered by time for cheap processing
-        self._get_events_mut().sort(key=lambda x: float(x.get("time", 0.0)))
-        return eid
-
-    def _process_one_event(self, e: Dict[str, Any]) -> None:
-        et = str(e.get("type", ""))
-        data = e.get("data") or {}
-        if not isinstance(data, dict):
-            data = {}
-
-        # Both event types ultimately install a module
-        if et in ("install_module", "build_module_complete"):
-            station_id = int(data.get("station_id", -1))
-            module_id = str(data.get("module_id", "")).strip()
-            if station_id <= 0 or not module_id:
-                return
-
-            station = self._find_station_mut(station_id)
-
-            mods = station.get("modules")
-            if not isinstance(mods, list):
-                mods = []
-                station["modules"] = mods
-
-            if module_id in mods:
-                return
-
-            if not get_module(module_id):
-                return
-
-            preview = self._preview_stats_after_add(station, module_id)
-            problems = self._budget_problems(preview)
-            if problems:
-                return
-
-            mods.append(module_id)
-            return
-
-        return
-
-
-    def _process_due_events(self) -> int:
-        """
-        Process all events with time <= current sim_time.
-        Returns how many events were processed.
-        """
-        sim_time = float(self.state.get("sim_time", 0.0))
-        ev = self._get_events_mut()
-        if not ev:
-            return 0
-
-        # Because we keep events sorted by time, we can pop from front
-        processed: list[Dict[str, Any]] = []
-        while ev and float(ev[0].get("time", 0.0)) <= sim_time + 1e-9:
-            processed.append(ev.pop(0))
-
-        for e in processed:
-            try:
-                self._process_one_event(e)
-            except Exception:
-                # For v1: swallow errors to avoid killing the sim loop
-                # Later: log failures
-                pass
-
-        return len(processed)
-
-    # ----------------------------
     # Simulation
     # ----------------------------
 
@@ -590,14 +547,16 @@ class Universe:
         """Advance simulation time by dt seconds."""
         if dt <= 0:
             return
+
         self.state["sim_time"] = float(self.state.get("sim_time", 0.0)) + float(dt)
-        # Passive income: station fees/taxes (tiny, just to prove economy)
+
+        # Passive income (tiny, just to prove economy)
         for s in self.state.get("stations", []):
             if s.get("owner_user_id") is not None:
-                s["credits"] = float(s.get("credits", 0.0)) + 0.1 * float(dt)  # 0.1 credits/sec
+                s["credits"] = float(s.get("credits", 0.0)) + 0.1 * float(dt)
+
         # Process any events that are now due
         self._process_due_events()
-
 
     def snapshot(self) -> Dict[str, Any]:
         """Safe snapshot for API responses."""
@@ -608,13 +567,8 @@ class Universe:
     # ----------------------------
 
     async def start(self) -> None:
-        """
-        Start the background tick loop.
-        Assumes load() has already been called.
-        Performs bounded catch-up first.
-        """
+        """Start the background tick loop (bounded catch-up first)."""
         await self._bounded_catchup()
-
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
 
@@ -629,9 +583,7 @@ class Universe:
             self.save()
 
     async def _bounded_catchup(self) -> None:
-        """
-        If the server was offline, simulate up to catchup_max seconds.
-        """
+        """If server was offline, simulate up to catchup_max seconds."""
         now = time.time()
         offline = max(0.0, now - self.last_update_real)
         catchup = min(offline, self.cfg.catchup_max)
@@ -639,7 +591,6 @@ class Universe:
         if catchup <= 0:
             return
 
-        # Advance in steps of tick_dt for determinism
         steps = int(catchup // self.cfg.tick_dt)
         remainder = catchup - steps * self.cfg.tick_dt
 
@@ -649,7 +600,6 @@ class Universe:
             if remainder > 1e-6:
                 self.advance(remainder)
 
-            # Save after catch-up so we don't repeat it next boot
             self.save()
             self._last_autosave_sim = float(self.state.get("sim_time", 0.0))
 
@@ -666,7 +616,6 @@ class Universe:
             sleep_for = max(0.0, next_wall - time.time())
 
             try:
-                # wait either until stop is set, or timeout for the next tick
                 await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
                 break
             except asyncio.TimeoutError:
@@ -683,4 +632,3 @@ class Universe:
     async def snapshot_async(self) -> Dict[str, Any]:
         async with self._lock:
             return self.snapshot()
-
